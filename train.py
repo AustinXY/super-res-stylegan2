@@ -19,7 +19,8 @@ from torch_utils import image_transforms
 
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
-from model import Generator, Discriminator
+from model import Generator, MappingNetwork, G_NET
+from finegan_config import finegan_config
 
 # try:
 import wandb
@@ -134,49 +135,77 @@ def child_to_parent(c_code, c_dim, p_dim):
         p_code[i][pid[i]] = 1
     return p_code
 
-def sample_codes(batch, latent_dim, device):
-    z = torch.randn(batch, latent_dim, device=device)
-    return z
+def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
+    z = torch.randn(batch, z_dim, device=device)
+    c = torch.zeros(batch, c_dim, device=device)
+    cid = np.random.randint(c_dim, size=batch)
+    for i in range(batch):
+        c[i, cid[i]] = 1
 
-def binarization_loss(mask):
-    return torch.min(1-mask, mask).mean()
+    p = child_to_parent(c, c_dim, p_dim)
+    b = c.clone()
+    return z, b, p, c
 
 
-def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
-    loader = sample_data(loader)
+def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['z', 'b', 'p', 'c']):
+    batch = prev_z.size(0)
+    if 'z' in rand_code:
+        z = torch.randn(batch, prev_z.size(1), device=device)
+    else:
+        z = prev_z
+
+    if 'b' in rand_code:
+        b = torch.zeros(batch, prev_b.size(1), device=device)
+        bid = np.random.randint(prev_b.size(1), size=batch)
+        for i in range(batch):
+            b[i, bid[i]] = 1
+    else:
+        b = prev_b
+
+    if 'p' in rand_code:
+        p = torch.zeros(batch, prev_p.size(1), device=device)
+        pid = np.random.randint(prev_p.size(1), size=batch)
+        for i in range(batch):
+            p[i, pid[i]] = 1
+    else:
+        p = prev_p
+
+    if 'c' in rand_code:
+        c = torch.zeros(batch, prev_c.size(1), device=device)
+        cid = np.random.randint(prev_c.size(1), size=batch)
+        for i in range(batch):
+            c[i, cid[i]] = 1
+    else:
+        c = prev_c
+
+    return z, b, p, c
+
+
+def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
 
     pbar = range(args.iter)
 
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
-    mean_path_length = 0
     cur_nimg = 0
-    d_loss_val = 0
-    r1_loss = torch.tensor(0.0, device=device)
-    g_loss_val = 0
-    path_loss = torch.tensor(0.0, device=device)
-    path_lengths = torch.tensor(0.0, device=device)
-    mean_path_length_avg = 0
     loss_dict = {}
 
     if args.distributed:
-        g_module = generator.module
-        d_module = discriminator.module
+        mp_module = mpnet.module
     else:
-        g_module = generator
-        d_module = discriminator
+        mp_module = mpnet
 
-
-    # accum = 0.5 ** (32 / (10 * 1000))
-    ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
-    r_t_stat = 0
-
-    if args.augment and args.augment_p == 0:
-        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 8, device)
 
     # criterion_construct = nn.MSELoss()
-    criterion_construct = nn.L1Loss()
+    criterion_reconstruct = nn.MSELoss().to(device)
+
+    style_generator.eval()
+    style_generator.requires_grad_(False)
+    fine_generator.eval()
+    fine_generator.requires_grad_(False)
+    mpnet.train()
+    mpnet.requires_grad_(True)
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -185,188 +214,81 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             print("Done!")
             break
 
-        real_img = next(loader)
-        real_img = real_img.to(device)
-        # real_bbox = mask_to_bbox(real_mask, args.threshold)
-        # real_pair = torch.cat((real_img, real_bbox), dim=1)
-
         ############# train child discriminator #############
-        generator.requires_grad_(False)
-        discriminator.requires_grad_(True)
+        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        z, b, p, c = rand_sample_codes(z, b, p, c, device)
 
-        z = sample_codes(args.batch, args.z_dim, device)
-        fake_img = generator(z)
+        fine_img = fine_generator(z, b, p, c)
 
-        real_pred = discriminator(real_img)
-        fake_pred = discriminator(fake_img)
+        utils.save_image(
+            fine_img,
+            f"tt.png",
+            nrow=8,
+            normalize=True,
+            range=(-1, 1),
+        )
 
-        d_loss = d_logistic_loss(real_pred, fake_pred)
+        sys
 
-        loss_dict["d"] = d_loss
-        loss_dict["real_score"] = real_pred.mean()
-        loss_dict["fake_score"] = fake_pred.mean()
+        wp_code = mpnet(fine_img)
+        style_img, _ = style_generator([wp_code], input_is_latent=True)
 
-        discriminator.zero_grad()
-        d_loss.backward()
-        d_optim.step()
+        _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
+        recon_loss = criterion_reconstruct(_style_img, fine_img)
 
-        if args.augment and args.augment_p == 0:
-            ada_aug_p = ada_augment.tune(real_pred)
-            r_t_stat = ada_augment.r_t_stat
-
-        d_regularize = i % args.d_reg_every == 0
-
-        if d_regularize:
-            real_img.requires_grad = True
-
-            # if args.augment:
-            #     real_img_aug, _ = augment(real_img_tmp, ada_aug_p)
-
-            # else:
-            #     real_img_aug = real_img_tmp
-
-            real_pred = discriminator(real_img)
-            r1_penalty = d_r1_loss(real_pred, real_img)
-            r1_loss = r1_penalty.mean() * (args.r1_gamma / 2)
-
-            discriminator.zero_grad()
-            (r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
-
-            d_optim.step()
-
-        loss_dict["r1"] = r1_loss
-
-
-        ############# train generator #############
-        generator.requires_grad_(True)
-        discriminator.requires_grad_(False)
-
-        z = sample_codes(args.batch, args.z_dim, device)
-        style_img = generator(z)
-
-        # child rf
-        fake_pred = discriminator(style_img)
-        g_loss = g_nonsaturating_loss(fake_pred)
-
-        loss_dict["g"] = g_loss
-
-        generator.zero_grad()
-        g_loss.backward()
-        g_optim.step()
-
-        g_regularize = i % args.g_reg_every == 0
-
-        if g_regularize:
-            path_batch_size = max(1, args.batch // args.path_batch_shrink)
-
-            z = sample_codes(path_batch_size, args.z_dim, device)
-            ws = generator.get_latent(z)
-
-            fake_img = generator.generate(ws)
-
-            path_loss, mean_path_length, path_lengths = g_path_regularize(
-                fake_img, ws, mean_path_length
-            )
-
-            generator.zero_grad()
-            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
-
-            if args.path_batch_shrink:
-                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
-
-            weighted_path_loss.backward()
-
-            g_optim.step()
-
-            mean_path_length_avg = (
-                reduce_sum(mean_path_length).item() / get_world_size()
-            )
-
-        loss_dict["path"] = path_loss
-        loss_dict["path_length"] = path_lengths.mean()
-
-        # Update G_ema.
-        requires_grad(generator, False)
-        # accumulate(g_ema, g_module, accum)
-        ema_nimg = args.ema_kimg * 1000
-        if args.ema_rampup is not None:
-            ema_nimg = min(ema_nimg, cur_nimg * args.ema_rampup)
-        ema_beta = 0.5 ** (args.batch / max(ema_nimg, 1e-8))
-        for p_ema, p in zip(g_ema.parameters(), generator.parameters()):
-            p_ema.copy_(p.lerp(p_ema, ema_beta))
-        for b_ema, b in zip(g_ema.buffers(), generator.buffers()):
-            b_ema.copy_(b)
+        mpnet.zero_grad()
+        recon_loss.backward()
+        mp_optim.step()
 
         cur_nimg += args.batch
 
         loss_reduced = reduce_loss_dict(loss_dict)
 
-        d_loss_val = loss_reduced["d"].mean().item()
-        g_loss_val = loss_reduced["g"].mean().item()
-        r1_val = loss_reduced["r1"].mean().item()
-        path_loss_val = loss_reduced["path"].mean().item()
-        real_score_val = loss_reduced["real_score"].mean().item()
-        fake_score_val = loss_reduced["fake_score"].mean().item()
-        path_length_val = loss_reduced["path_length"].mean().item()
+        recon_loss_val = loss_reduced["recon"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; "
-                    f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; r1: {r1_val:.4f}; "
-                    f"augment: {ada_aug_p:.4f}"
+                    f"recon: {recon_loss_val:.4f}; "
                 )
             )
 
             if wandb and args.wandb:
                 wandb.log(
                     {
-                        "Generator": g_loss_val,
-                        "Discriminator": d_loss_val,
-                        "Augment": ada_aug_p,
-                        "Rt": r_t_stat,
-                        "R1": r1_val,
-                        "Path Length Regularization": path_loss_val,
-                        "Mean Path Length": mean_path_length,
-                        "Real Score": real_score_val,
-                        "Fake Score": fake_score_val,
-                        "Path Length": path_length_val,
+                        "Reconstruction": recon_loss_val,
                     }
                 )
 
             if i % 1000 == 0:
                 with torch.no_grad():
-                    g_ema.eval()
+                    # mpnet.eval()
 
-                    _style_img = None
-                    for _ in range(4):
-                        z = sample_codes(8, args.z_dim, device)
-                        style_img = g_ema(z, mix_style=False, noise_mode='const')
+                    z, b, p, c = sample_codes(args.n_sample, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                    z, b, p, c = rand_sample_codes(z, b, p, c, device)
 
-                        if _style_img is None:
-                            _style_img = style_img
-                        else:
-                            _style_img = torch.cat([_style_img, style_img])
+                    fine_img = fine_generator(z, b, p, c)
+                    wp_code = mpnet(fine_img)
+                    style_img, _ = style_generator([wp_code], input_is_latent=True)
 
                     utils.save_image(
-                        _style_img,
-                        f"sample/{str(i).zfill(6)}.png",
+                        fine_img,
+                        f"sample/{str(i).zfill(6)}_0.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        style_img,
+                        f"sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
                         range=(-1, 1),
                     )
 
             if i % 100000 == 0 and i != 0:
-                torch.save(
-                    {
-                        "g": g_module.state_dict(),
-                        "d": d_module.state_dict(),
-                        "g_ema": g_ema.state_dict(),
-                        "g_optim": g_optim.state_dict(),
-                        "d_optim": d_optim.state_dict(),
-                        "args": args,
-                        "ada_aug_p": ada_aug_p,
-                    },
+                torch.save(mp_module.state_dict(),
                     f"checkpoint/{str(i).zfill(6)}.pt",
                 )
 
@@ -374,61 +296,40 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 if __name__ == "__main__":
     device = "cuda"
 
-    parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
+    parser = argparse.ArgumentParser(description="mpnet trainer")
 
-    parser.add_argument("path", type=str, help="path to the lmdb dataset")
+    parser.add_argument('--arch', type=str, default='stylegan2', help='model architectures (stylegan2 | swagan)')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
     parser.add_argument(
-        "--batch", type=int, default=0, help="batch sizes for each gpus"
+        "--batch", type=int, default=16, help="batch sizes for each gpus"
     )
     parser.add_argument(
         "--n_sample",
         type=int,
-        default=32,
+        default=8,
         help="number of the samples generated during training",
     )
     parser.add_argument(
         "--size", type=int, default=256, help="image sizes for the model"
     )
     parser.add_argument(
-        "--r1", type=float, default=10, help="weight of the r1 regularization"
-    )
-    parser.add_argument(
-        "--path_regularize",
-        type=float,
-        default=2,
-        help="weight of the path length regularization",
-    )
-    parser.add_argument(
-        "--path_batch_shrink",
-        type=int,
-        default=2,
-        help="batch size reducing factor for the path length regularization (reduce memory consumption)",
-    )
-    parser.add_argument(
-        "--d_reg_every",
-        type=int,
-        default=16,
-        help="interval of the applying r1 regularization",
-    )
-    parser.add_argument(
-        "--g_reg_every",
-        type=int,
-        default=4,
-        help="interval of the applying path length regularization",
-    )
-    parser.add_argument(
         "--mixing", type=float, default=0.9, help="probability of latent code mixing"
     )
     parser.add_argument(
-        "--ckpt",
+        "--style_model",
         type=str,
         default=None,
-        help="path to the checkpoints to resume training",
+        help="path to stylegan",
     )
-    parser.add_argument("--lr", type=float, default=0.0025, help="learning rate")
+    parser.add_argument(
+        "--fine_model",
+        type=str,
+        default=None,
+        help="path to finegan",
+    )
+    parser.add_argument("--lr", type=float, default=0.002, help="learning rate")
     parser.add_argument(
         "--channel_multiplier",
         type=int,
@@ -441,33 +342,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local_rank", type=int, default=0, help="local rank for distributed training"
     )
-    parser.add_argument(
-        "--augment", action="store_true", help="apply non leaking augmentation"
-    )
-    parser.add_argument(
-        "--augment_p",
-        type=float,
-        default=0,
-        help="probability of applying augmentation. 0 = use adaptive augmentation",
-    )
-    parser.add_argument(
-        "--ada_target",
-        type=float,
-        default=0.6,
-        help="target augmentation probability for adaptive augmentation",
-    )
-    parser.add_argument(
-        "--ada_length",
-        type=int,
-        default=500 * 1000,
-        help="target duraing to reach augmentation probability for adaptive augmentation",
-    )
-    parser.add_argument(
-        "--ada_every",
-        type=int,
-        default=256,
-        help="probability update interval of the adaptive augmentation",
-    )
+
 
     args = parser.parse_args()
 
@@ -479,149 +354,84 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
         synchronize()
 
-    cfg_specs = {
-        'auto':      dict(ref_gpus=-1, kimg=25000,  mb=-1, mbstd=-1, fmaps=-1,  lrate=-1,     gamma=-1,   ema=-1,  ramp=0.05, map=2), # Populated dynamically based on resolution and GPU count.
-        'stylegan2': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=10,   ema=10,  ramp=None, map=8), # Uses mixed-precision, unlike the original StyleGAN2.
-        'paper256':  dict(ref_gpus=8,  kimg=25000,  mb=64, mbstd=8,  fmaps=0.5, lrate=0.0025, gamma=1,    ema=20,  ramp=None, map=8),
-        'paper512':  dict(ref_gpus=8,  kimg=25000,  mb=64, mbstd=8,  fmaps=1,   lrate=0.0025, gamma=0.5,  ema=20,  ramp=None, map=8),
-        'paper1024': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=2,    ema=10,  ramp=None, map=8),
-        'cifar':     dict(ref_gpus=2,  kimg=100000, mb=64, mbstd=32, fmaps=1,   lrate=0.0025, gamma=0.01, ema=500, ramp=0.05, map=2),
-    }
-
-    cfg = 'auto'
-    gpus = 1
-    spec = dnnlib.EasyDict(cfg_specs[cfg])
-    if cfg == 'auto':
-        spec.ref_gpus = gpus
-        res = args.size
-        spec.mb = max(min(gpus * min(4096 // res // 2, 32), 64), gpus) # keep gpu memory consumption at bay
-        spec.mbstd = min(spec.mb // gpus, 4) # other hyperparams behave more predictably if mbstd group size remains fixed
-        spec.fmaps = 1 if res >= 512 else 0.5
-        spec.lrate = 0.002 if res >= 1024 else 0.0025
-        spec.gamma = 0.0002 * (res ** 2) / spec.mb # heuristic formula
-        spec.ema = spec.mb * 10 / 32
-
-    args.fine_z_dim = 100
-    args.z_dim = 512
-    args.w_dim = 512
+    args.latent = 512
     args.n_mlp = 8
-    args.r1_gamma = spec.gamma
-    args.ema_kimg = 2.5
-    args.ema_rampup = 0.05
-
-    args.img_dim = 3
 
     args.start_iter = 0
 
-    # args.fine_train_every = 10
-    # args.fine_model = '../data/fine_model/fine_models.pt'
-    # args.fine_wt = 0
+    args.z_dim = finegan_config['Z_DIM']
+    args.b_dim = finegan_config['FINE_GRAINED_CATEGORIES']
+    args.p_dim = finegan_config['SUPER_CATEGORIES']
+    args.c_dim = finegan_config['FINE_GRAINED_CATEGORIES']
 
-    if args.batch == 0:
-        args.batch = spec.mb
-    print('batch size: ', args.batch)
+    if args.arch == 'stylegan2':
+        from model import Generator, Discriminator
 
-    generator = Generator(
-        w_dim               = args.w_dim,               # Intermediate latent (W) dimensionality.
-        img_resolution      = args.size,                # Output resolution.
-        img_channels        = 3,                        # Number of output color channels.
-        mapping_kwargs      = {},        # Arguments for MappingNetwork.
-        condition_const     = False,
-        z_dim               = args.z_dim,
-        synthesis_kwargs    = {'channel_base': 32768,
-                               'channel_max': 512,
-                               'num_fp16_res': 4,
-                               'conv_clamp': 256},      # Arguments for SynthesisNetwork.
-        epilogue_kwargs     = {'mbstd_group_size': 4},  # Arguments for DiscriminatorEpilogue.
-    ).train().requires_grad_(False).to(device)
+    elif args.arch == 'swagan':
+        from swagan import Generator, Discriminator
 
-    g_ema = copy.deepcopy(generator)
-    g_ema.eval()
-    # accumulate(g_ema, generator, 0)
+    style_generator = Generator(
+        size=args.size,
+        style_dim=args.latent,
+        n_mlp=args.n_mlp,
+        channel_multiplier=args.channel_multiplier
+    ).to(device)
 
-    discriminator = Discriminator(
-        c_dim               = 0,                        # Conditioning label (C) dimensionality.
-        img_resolution      = args.size,                # Input resolution.
-        img_channels        = 3,                        # Number of input color channels.
-        architecture        = 'resnet',                 # Architecture: 'orig', 'skip', 'resnet'.
-        channel_base        = 32768,                    # Overall multiplier for the number of channels.
-        channel_max         = 512,                      # Maximum number of channels in any layer.
-        num_fp16_res        = 4,                        # Use FP16 for the N highest resolutions.
-        conv_clamp          = 256,                      # Clamp the output of convolution layers to +-X, None = disable clamping.
-        cmap_dim            = None,                     # Dimensionality of mapped conditioning label, None = default.
-        block_kwargs        = {},                       # Arguments for DiscriminatorBlock.
-        mapping_kwargs      = {},                       # Arguments for MappingNetwork.
-        epilogue_kwargs     = {'mbstd_group_size': 4},  # Arguments for DiscriminatorEpilogue.
-        predict_c           = False,     # If predict c, then info discriminator, else conditional discriminator.
-    ).train().requires_grad_(False).to(device)
+    mpnet = MappingNetwork(
+        num_ws=style_generator.n_latent,
+        w_dim=args.latent
+    ).to(device)
 
-    g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
-    d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
-    # g_reg_ratio = 1
-    # d_reg_ratio = 1
+    fine_generator = G_NET().to(device)
 
-    g_optim = optim.Adam(
-        generator.parameters(),
-        lr=args.lr * g_reg_ratio,
-        betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),
-    )
-
-    d_optim = optim.Adam(
-        discriminator.parameters(),
-        lr=args.lr * d_reg_ratio,
-        betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
+    mp_optim = optim.Adam(
+        mpnet.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
     )
 
 
-    if args.ckpt is not None:
-        print("load model:", args.ckpt)
+    assert args.style_model is not None
+    print("load style model:", args.style_model)
 
-        ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
+    style_dict = torch.load(args.style_model, map_location=lambda storage, loc: storage)
 
-        try:
-            ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
+    try:
+        ckpt_name = os.path.basename(args.style_model)
+        args.start_iter = int(os.path.splitext(ckpt_name)[0])
 
-        except ValueError:
-            pass
+    except ValueError:
+        pass
 
-        generator.load_state_dict(ckpt["g"])
-        g_ema.load_state_dict(ckpt["g_ema"])
+    style_generator.load_state_dict(style_dict["g"])
 
-        g_optim.load_state_dict(ckpt["g_optim"])
-        d_optim.load_state_dict(ckpt["d_optim"])
+    assert args.fine_model is not None
+    print("load fine model:", args.fine_model)
+
+    fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
+    fine_generator.load_state_dict(fine_dict)
+
+    # torch.save(fine_generator.module.state_dict(),
+    #     f"../data/fine_model/lsuncar1600k.pt",
+    # )
 
     if args.distributed:
-        generator = nn.parallel.DistributedDataParallel(
-            generator,
+        style_generator = nn.parallel.DistributedDataParallel(
+            style_generator,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
 
-        discriminator = nn.parallel.DistributedDataParallel(
-            discriminator,
+        fine_generator = nn.parallel.DistributedDataParallel(
+            fine_generator,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
 
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-        ]
-    )
-
-    dataset = MultiResolutionDataset(args.path, transform, args.size)
-    loader = data.DataLoader(
-        dataset,
-        batch_size=args.batch,
-        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
-        drop_last=True,
-    )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="super res offi")
+        wandb.init(project="mapping net")
 
-    train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device)
+    train(args, fine_generator, style_generator, mpnet, mp_optim, device)

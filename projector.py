@@ -2,15 +2,17 @@ import argparse
 import math
 import os
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 import torch
 from torch import optim
 from torch.nn import functional as F
-from torchvision import transforms
+from torchvision import transforms, utils
 from PIL import Image
 from tqdm import tqdm
 
 import lpips
-from model import Generator
+from model import Generator, Discriminator
 
 
 def noise_regularize(noises):
@@ -56,6 +58,11 @@ def latent_noise(latent, strength):
     noise = torch.randn_like(latent) * strength
 
     return latent + noise
+
+
+def g_nonsaturating_loss(fake_pred):
+    loss = F.softplus(-fake_pred).mean()
+    return loss
 
 
 def make_image(tensor):
@@ -114,6 +121,7 @@ if __name__ == "__main__":
         help="weight of the noise regularization",
     )
     parser.add_argument("--mse", type=float, default=0, help="weight of the mse loss")
+    parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
     parser.add_argument(
         "--w_plus",
         action="store_true",
@@ -158,6 +166,11 @@ if __name__ == "__main__":
         latent_mean = latent_out.mean(0)
         latent_std = ((latent_out - latent_mean).pow(2).sum() / n_mean_latent) ** 0.5
 
+    discriminator = Discriminator(args.size).to(device)
+    discriminator.load_state_dict(torch.load(args.ckpt)["d"])
+    discriminator.eval()
+    discriminator.requires_grad_(False)
+
     percept = lpips.PerceptualLoss(
         model="net-lin", net="vgg", use_gpu=device.startswith("cuda")
     )
@@ -190,6 +203,7 @@ if __name__ == "__main__":
         latent_n = latent_noise(latent_in, noise_strength.item())
 
         img_gen, _ = g_ema([latent_n], input_is_latent=True, noise=noises)
+        fake_pred = discriminator(img_gen)
 
         batch, channel, height, width = img_gen.shape
 
@@ -204,8 +218,9 @@ if __name__ == "__main__":
         p_loss = percept(img_gen, imgs).sum()
         n_loss = noise_regularize(noises)
         mse_loss = F.mse_loss(img_gen, imgs)
+        adv_loss = g_nonsaturating_loss(fake_pred)
 
-        loss = p_loss + args.noise_regularize * n_loss + args.mse * mse_loss
+        loss = p_loss + args.noise_regularize * n_loss + args.mse * mse_loss + args.adv * adv_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -218,18 +233,23 @@ if __name__ == "__main__":
 
         pbar.set_description(
             (
-                f"perceptual: {p_loss.item():.4f}; noise regularize: {n_loss.item():.4f};"
-                f" mse: {mse_loss.item():.4f}; lr: {lr:.4f}"
+                f"perceptual: {p_loss.item():.4f}; adversarial: {adv_loss.item():.4f}; "
+                f"noise regularize: {n_loss.item():.4f}; mse: {mse_loss.item():.4f}; lr: {lr:.4f}"
             )
         )
 
     img_gen, _ = g_ema([latent_path[-1]], input_is_latent=True, noise=noises)
 
-    filename = os.path.splitext(os.path.basename(args.files[0]))[0] + ".pt"
+
+    with torch.no_grad():
+        print(discriminator(img_gen))
+
+    filename = 'style_project/' + os.path.splitext(os.path.basename(args.files[0]))[0] + ".pt"
 
     img_ar = make_image(img_gen)
 
     result_file = {}
+    result_img = None
     for i, input_name in enumerate(args.files):
         noise_single = []
         for noise in noises:
@@ -241,8 +261,15 @@ if __name__ == "__main__":
             "noise": noise_single,
         }
 
-        img_name = os.path.splitext(os.path.basename(input_name))[0] + "-project.png"
+        img_name = 'style_project/' + os.path.splitext(os.path.basename(input_name))[0] + "-project.png"
         pil_img = Image.fromarray(img_ar[i])
         pil_img.save(img_name)
 
+    utils.save_image(
+        img_gen,
+        f"style_project/project.png",
+        nrow=8,
+        normalize=True,
+        range=(-1, 1),
+    )
     torch.save(result_file, filename)
