@@ -1,4 +1,4 @@
-close<br>
-require image and bbox pair to look real
-	bbox being the fourth channel?
-	close: discriminator can look at three things (possible short cuts): 1) bbox rf 2) bbox & image relation 3) image rf
+1. sample fineGAN images
+python3 sample_fine_img.py --rand_code c --ds_name LSUNCAR --fine_model ../data/fine_model/lsuncar1600k.pt
+2. project fineGAN images to styleGAN latent space
+python3 projector.py --w_plus  --ckpt ../data/style_model/110000.pt --size 512 fine_sample/fine0.png fine_sample/fine1.png fine_sample/fine2.png fine_sample/fine3.png fine_sample/fine4.png fine_sample/fine5.png fine_sample/fine6.png fine_sample/fine7.png
