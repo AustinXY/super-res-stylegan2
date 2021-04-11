@@ -79,6 +79,18 @@ def make_image(tensor):
     )
 
 
+def loss_geocross(latent, n_latent):
+    if len(latent.size()) == 2:
+        return torch.zeros(1, device=latent.device)
+    else:
+        X = latent.view(-1, 1, n_latent, 512)
+        Y = latent.view(-1, n_latent, 1, 512)
+        A = ((X-Y).pow(2).sum(-1)+1e-9).sqrt()
+        B = ((X+Y).pow(2).sum(-1)+1e-9).sqrt()
+        D = 2*torch.atan2(A, B)
+        D = ((D.pow(2)*512).mean((1, 2))/8.).sum()
+        return D
+
 if __name__ == "__main__":
     device = "cuda"
 
@@ -120,8 +132,11 @@ if __name__ == "__main__":
         default=1e5,
         help="weight of the noise regularization",
     )
-    parser.add_argument("--mse", type=float, default=0, help="weight of the mse loss")
-    parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
+    parser.add_argument("--vgg", type=float, default=0, help="weight of the vgg loss")
+    parser.add_argument("--mse", type=float, default=1, help="weight of the mse loss")
+    parser.add_argument("--geo", type=float, default=0, help="weight of the geo loss")
+    parser.add_argument("--l1", type=float, default=0, help="weight of the l1 loss")
+    parser.add_argument("--adv", type=float, default=0, help="weight of the adv loss")
     parser.add_argument(
         "--w_plus",
         action="store_true",
@@ -135,7 +150,7 @@ if __name__ == "__main__":
 
     n_mean_latent = 10000
 
-    resize = min(args.size, 256)
+    resize = min(args.size, 128)
 
     transform = transforms.Compose(
         [
@@ -201,14 +216,13 @@ if __name__ == "__main__":
         optimizer.param_groups[0]["lr"] = lr
         noise_strength = latent_std * args.noise * max(0, 1 - t / args.noise_ramp) ** 2
         latent_n = latent_noise(latent_in, noise_strength.item())
-
         img_gen, _ = g_ema([latent_n], input_is_latent=True, noise=noises)
         fake_pred = discriminator(img_gen)
 
         batch, channel, height, width = img_gen.shape
 
-        if height > 256:
-            factor = height // 256
+        if height > 128:
+            factor = height // 128
 
             img_gen = img_gen.reshape(
                 batch, channel, height // factor, factor, width // factor, factor
@@ -218,9 +232,12 @@ if __name__ == "__main__":
         p_loss = percept(img_gen, imgs).sum()
         n_loss = noise_regularize(noises)
         mse_loss = F.mse_loss(img_gen, imgs)
+        l1_loss = F.l1_loss(img_gen, imgs)
         adv_loss = g_nonsaturating_loss(fake_pred)
+        geo_loss = loss_geocross(latent_in, g_ema.n_latent)
 
-        loss = p_loss + args.noise_regularize * n_loss + args.mse * mse_loss + args.adv * adv_loss
+        loss = args.vgg * p_loss + args.noise_regularize * n_loss + args.mse * \
+            mse_loss + args.adv * adv_loss + args.l1 * l1_loss + args.geo * geo_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -233,8 +250,8 @@ if __name__ == "__main__":
 
         pbar.set_description(
             (
-                f"perceptual: {p_loss.item():.4f}; adversarial: {adv_loss.item():.4f}; "
-                f"noise regularize: {n_loss.item():.4f}; mse: {mse_loss.item():.4f}; lr: {lr:.4f}"
+                f"perceptual: {args.vgg * p_loss.item():.4f}; adversarial: {args.adv * adv_loss.item():.4f}; geo: {args.geo * geo_loss.item():.4f}; "
+                f"noise regularize: {args.noise_regularize * n_loss.item():.4f}; mse: {args.mse * mse_loss.item():.4f}; l1: {args.l1 * l1_loss.item():.4f}; lr: {lr:.4f}"
             )
         )
 

@@ -115,9 +115,9 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    style_generator.load_state_dict(style_dict["g"])
+    style_generator.load_state_dict(style_dict["g"], strict=False)
     style_generator.eval()
-    discriminator.load_state_dict(style_dict["d"])
+    discriminator.load_state_dict(style_dict["d"], strict=False)
     discriminator.eval()
 
     with torch.no_grad():
