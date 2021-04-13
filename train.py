@@ -20,7 +20,7 @@ from torch_utils import image_transforms
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 from model import Generator, MappingNetwork, G_NET
-from finegan_config import finegan_config
+from sbg_model import StyledGenerator
 
 # try:
 import wandb
@@ -126,86 +126,64 @@ def set_grad_none(model, targets):
         if n in targets:
             p.grad = None
 
-def child_to_parent(c_code, c_dim, p_dim):
-    ratio = c_dim / p_dim
-    cid = torch.argmax(c_code,  dim=1)
-    pid = (cid / ratio).long()
-    p_code = torch.zeros([c_code.size(0), p_dim], device=c_code.device)
-    for i in range(c_code.size(0)):
-        p_code[i][pid[i]] = 1
-    return p_code
 
-def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
+@torch.no_grad()
+def get_mean_style(generator, device):
+    mean_style = None
+
+    for i in range(10):
+        style = generator.mean_style(torch.randn(1024, 512).to(device))
+
+        if mean_style is None:
+            mean_style = style
+
+        else:
+            mean_style += style
+
+    mean_style /= 10
+    return mean_style
+
+
+def sample_codes(batch, z_dim, device):
     z = torch.randn(batch, z_dim, device=device)
-    c = torch.zeros(batch, c_dim, device=device)
-    cid = np.random.randint(c_dim, size=batch)
-    for i in range(batch):
-        c[i, cid[i]] = 1
-
-    p = child_to_parent(c, c_dim, p_dim)
-    b = c.clone()
-    return z, b, p, c
+    return z
 
 
-def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['z', 'b', 'p', 'c']):
-    batch = prev_z.size(0)
-    if 'z' in rand_code:
-        z = torch.randn(batch, prev_z.size(1), device=device)
-    else:
-        z = prev_z
-
-    if 'b' in rand_code:
-        b = torch.zeros(batch, prev_b.size(1), device=device)
-        bid = np.random.randint(prev_b.size(1), size=batch)
-        for i in range(batch):
-            b[i, bid[i]] = 1
-    else:
-        b = prev_b
-
-    if 'p' in rand_code:
-        p = torch.zeros(batch, prev_p.size(1), device=device)
-        pid = np.random.randint(prev_p.size(1), size=batch)
-        for i in range(batch):
-            p[i, pid[i]] = 1
-    else:
-        p = prev_p
-
-    if 'c' in rand_code:
-        c = torch.zeros(batch, prev_c.size(1), device=device)
-        cid = np.random.randint(prev_c.size(1), size=batch)
-        for i in range(batch):
-            c[i, cid[i]] = 1
-    else:
-        c = prev_c
-
-    return z, b, p, c
-
-
-def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
+def train(args, loader, sbg_generator, style_generator, style_discriminator, mpnet, mp_optim, d_optim, device):
+    loader = sample_data(loader)
 
     pbar = range(args.iter)
 
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
-    cur_nimg = 0
+    # cur_nimg = 0
     loss_dict = {}
 
     if args.distributed:
         mp_module = mpnet.module
+        sbg_g_module = sbg_generator.module
+        style_g_module = style_generator.module
+        style_d_module = style_discriminator.module
     else:
         mp_module = mpnet
+        sbg_g_module = sbg_generator
+        style_g_module = style_generator
+        style_d_module = style_discriminator
 
 
     # criterion_construct = nn.MSELoss()
-    criterion_reconstruct = nn.MSELoss().to(device)
+    # criterion_reconstruct = nn.MSELoss().to(device)
 
     style_generator.eval()
     style_generator.requires_grad_(False)
-    fine_generator.eval()
-    fine_generator.requires_grad_(False)
-    mpnet.train()
-    mpnet.requires_grad_(True)
+    sbg_generator.eval()
+    sbg_generator.requires_grad_(False)
+    style_discriminator.train()
+    # mpnet.requires_grad_(True)
+
+    sbg_mean_style = get_mean_style(sbg_generator, device)
+    sbg_step = int(math.log(args.sbg_size, 2)) - 2
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -214,49 +192,102 @@ def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
             print("Done!")
             break
 
-        ############# train child discriminator #############
-        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-        z, b, p, c = rand_sample_codes(z, b, p, c, device)
+        real_img = next(loader)
+        real_img = real_img.to(device)
 
-        fine_img = fine_generator(z, b, p, c)
+        mpnet.train()
 
-        utils.save_image(
-            fine_img,
-            f"tt.png",
-            nrow=8,
-            normalize=True,
-            range=(-1, 1),
+        ############# train discriminator #############
+        mpnet.requires_grad_(False)
+        style_discriminator.requires_grad_(True)
+
+        z = sample_codes(args.batch, args.z_dim, device)
+
+        sbg_img = sbg_generator(
+            z,
+            step=sbg_step,
+            alpha=1,
+            mean_style=sbg_mean_style,
+            style_weight=0.7,
         )
 
-        sys
+        wp_code = mpnet(sbg_img)
+        fake_img, _ = style_generator([wp_code], input_is_latent=True)
 
-        wp_code = mpnet(fine_img)
+        fake_pred = style_discriminator(fake_img)
+        real_pred = style_discriminator(real_img)
+
+        d_loss = d_logistic_loss(real_pred, fake_pred)
+
+        loss_dict["d"] = d_loss
+        loss_dict["real_score"] = real_pred.mean()
+        loss_dict["fake_score"] = fake_pred.mean()
+
+        style_discriminator.zero_grad()
+        d_loss.backward()
+        d_optim.step()
+
+
+        ############# train mapping network #############
+        mpnet.requires_grad_(True)
+        style_discriminator.requires_grad_(False)
+
+        z = sample_codes(args.batch, args.z_dim, device)
+
+        sbg_img = sbg_generator(
+            z,
+            step=sbg_step,
+            alpha=1,
+            mean_style=sbg_mean_style,
+            style_weight=0.7,
+        )
+
+        wp_code = mpnet(sbg_img)
         style_img, _ = style_generator([wp_code], input_is_latent=True)
 
-        _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-        recon_loss = criterion_reconstruct(_style_img, fine_img)
+        # adv loss
+        fake_pred = style_discriminator(style_img)
+        adv_loss = g_nonsaturating_loss(fake_pred)
+        loss_dict["adv"] = adv_loss
+
+        # mse loss
+        _style_img = F.interpolate(style_img, size=(args.sbg_size, args.sbg_size), mode='area')
+        mse_loss = F.mse_loss(_style_img, sbg_img)
+        loss_dict["mse"] = mse_loss
+
+        g_loss = adv_loss * args.adv + mse_loss * args.mse
 
         mpnet.zero_grad()
-        recon_loss.backward()
+        g_loss.backward()
         mp_optim.step()
 
-        cur_nimg += args.batch
+
+        ############# ############# #############
+
+        # cur_nimg += args.batch
 
         loss_reduced = reduce_loss_dict(loss_dict)
-
-        recon_loss_val = loss_reduced["recon"].mean().item()
+        d_loss_val = loss_reduced["d"].mean().item()
+        adv_loss_val = loss_reduced["adv"].mean().item()
+        mse_loss_val = loss_reduced["mse"].mean().item()
+        real_score_val = loss_reduced["real_score"].mean().item()
+        fake_score_val = loss_reduced["fake_score"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"recon: {recon_loss_val:.4f}; "
+                    f"mse: {mse_loss_val:.4f}; adv: {adv_loss_val:.4f};"
                 )
             )
 
             if wandb and args.wandb:
                 wandb.log(
                     {
-                        "Reconstruction": recon_loss_val,
+                        "Discriminator": d_loss_val,
+                        "Adversarial": adv_loss_val,
+                        "MSE": mse_loss_val,
+                        "Real Score": real_score_val,
+                        "Fake Score": fake_score_val,
                     }
                 )
 
@@ -264,15 +295,21 @@ def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
                 with torch.no_grad():
                     # mpnet.eval()
 
-                    z, b, p, c = sample_codes(args.n_sample, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-                    z, b, p, c = rand_sample_codes(z, b, p, c, device)
+                    z = sample_codes(8, args.z_dim, device)
 
-                    fine_img = fine_generator(z, b, p, c)
-                    wp_code = mpnet(fine_img)
+                    sbg_img = sbg_generator(
+                        z,
+                        step=sbg_step,
+                        alpha=1,
+                        mean_style=sbg_mean_style,
+                        style_weight=0.7,
+                    )
+
+                    wp_code = mpnet(sbg_img)
                     style_img, _ = style_generator([wp_code], input_is_latent=True)
 
                     utils.save_image(
-                        fine_img,
+                        sbg_img,
                         f"sample/{str(i).zfill(6)}_0.png",
                         nrow=8,
                         normalize=True,
@@ -287,8 +324,17 @@ def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
                         range=(-1, 1),
                     )
 
-            if i % 100000 == 0 and i != 0:
-                torch.save(mp_module.state_dict(),
+            if i % 20000 == 0 and i != 0:
+                torch.save(
+                    {
+                        "style_g": style_g_module.state_dict(),
+                        "style_d": style_d_module.state_dict(),
+                        "sbg_g": sbg_g_module.state_dict(),
+                        "mp": mp_module.state_dict(),
+                        "mp_optim": mp_optim.state_dict(),
+                        "d_optim": d_optim.state_dict(),
+                        "args": args,
+                    },
                     f"checkpoint/{str(i).zfill(6)}.pt",
                 )
 
@@ -298,6 +344,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="mpnet trainer")
 
+    parser.add_argument("path", type=str, help="path to the lmdb dataset")
     parser.add_argument('--arch', type=str, default='stylegan2', help='model architectures (stylegan2 | swagan)')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
@@ -315,6 +362,9 @@ if __name__ == "__main__":
         "--size", type=int, default=256, help="image sizes for the model"
     )
     parser.add_argument(
+        "--sbg_size", type=int, default=128, help="image sizes for the sbg model"
+    )
+    parser.add_argument(
         "--mixing", type=float, default=0.9, help="probability of latent code mixing"
     )
     parser.add_argument(
@@ -324,7 +374,7 @@ if __name__ == "__main__":
         help="path to stylegan",
     )
     parser.add_argument(
-        "--fine_model",
+        "--sbg_model",
         type=str,
         default=None,
         help="path to finegan",
@@ -343,6 +393,9 @@ if __name__ == "__main__":
         "--local_rank", type=int, default=0, help="local rank for distributed training"
     )
 
+    ## weights
+    parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
+    parser.add_argument("--mse", type=float, default=1, help="weight of the mse loss")
 
     args = parser.parse_args()
 
@@ -359,10 +412,7 @@ if __name__ == "__main__":
 
     args.start_iter = 0
 
-    args.z_dim = finegan_config['Z_DIM']
-    args.b_dim = finegan_config['FINE_GRAINED_CATEGORIES']
-    args.p_dim = finegan_config['SUPER_CATEGORIES']
-    args.c_dim = finegan_config['FINE_GRAINED_CATEGORIES']
+    args.z_dim = 512
 
     if args.arch == 'stylegan2':
         from model import Generator, Discriminator
@@ -377,12 +427,25 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
+    style_discriminator = Discriminator(
+        size=args.size,
+        channel_multiplier=args.channel_multiplier
+    ).to(device)
+
+    sbg_generator = StyledGenerator(
+        code_dim=args.z_dim
+    ).to(device)
+
     mpnet = MappingNetwork(
         num_ws=style_generator.n_latent,
         w_dim=args.latent
     ).to(device)
 
-    fine_generator = G_NET().to(device)
+    d_optim = optim.Adam(
+        style_discriminator.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
 
     mp_optim = optim.Adam(
         mpnet.parameters(),
@@ -403,17 +466,16 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    style_generator.load_state_dict(style_dict["g"])
+    style_generator.load_state_dict(style_dict["g_ema"], strict=False)
+    style_discriminator.load_state_dict(style_dict["d"], strict=False)
 
-    assert args.fine_model is not None
-    print("load fine model:", args.fine_model)
+    assert args.sbg_model is not None
+    print("load sbg model:", args.sbg_model)
 
-    fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
-    fine_generator.load_state_dict(fine_dict)
+    sbg_dict = torch.load(args.sbg_model, map_location=lambda storage, loc: storage)
 
-    # torch.save(fine_generator.module.state_dict(),
-    #     f"../data/fine_model/lsuncar1600k.pt",
-    # )
+    # sbg_generator.load_state_dict(sbg_dict['generator'])
+    sbg_generator.load_state_dict(sbg_dict)
 
     if args.distributed:
         style_generator = nn.parallel.DistributedDataParallel(
@@ -423,15 +485,38 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
-        fine_generator = nn.parallel.DistributedDataParallel(
-            fine_generator,
+        style_discriminator = nn.parallel.DistributedDataParallel(
+            style_discriminator,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
 
+        sbg_generator = nn.parallel.DistributedDataParallel(
+            sbg_generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
+    transform = transforms.Compose(
+        [
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+        ]
+    )
+
+    dataset = MultiResolutionDataset(args.path, transform, args.size)
+    loader = data.DataLoader(
+        dataset,
+        batch_size=args.batch,
+        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
+        drop_last=True,
+    )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="mapping net")
+        wandb.init(project="ffhq test")
 
-    train(args, fine_generator, style_generator, mpnet, mp_optim, device)
+    train(args, loader, sbg_generator, style_generator, style_discriminator, mpnet, mp_optim, d_optim, device)
