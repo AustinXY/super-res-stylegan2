@@ -16,10 +16,11 @@ import torch.distributed as dist
 from torchvision import transforms, utils
 from tqdm import tqdm
 from torch_utils import image_transforms
+from PIL import Image
 
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
-from model import Generator, MappingNetwork, G_NET
+from model import Generator, MappingNetwork, G_NET, Encoder
 from sbg_model import StyledGenerator
 
 # try:
@@ -28,6 +29,7 @@ import wandb
 # except ImportError:
 #     wandb = None
 
+from op import conv2d_gradfix
 from dataset import MultiResolutionDataset
 
 from distributed import (
@@ -92,11 +94,12 @@ def d_logistic_loss(real_pred, fake_pred):
 
 
 def d_r1_loss(real_pred, real_img):
-    grad_real, = autograd.grad(
-        outputs=real_pred.sum(), inputs=real_img, create_graph=True, only_inputs=True
-    )
-    # grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
-    grad_penalty = grad_real.square().sum([1,2,3])
+    with conv2d_gradfix.no_weight_gradients():
+        grad_real, = autograd.grad(
+            outputs=real_pred.sum(), inputs=real_img, create_graph=True
+        )
+    grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+
     return grad_penalty
 
 
@@ -126,6 +129,18 @@ def set_grad_none(model, targets):
         if n in targets:
             p.grad = None
 
+def make_noise(batch, latent_dim, n_noise, device):
+    if n_noise == 1:
+        return torch.randn(batch, latent_dim, device=device)
+    noises = torch.randn(n_noise, batch, latent_dim, device=device).unbind(0)
+    return noises
+
+
+def mixing_noise(batch, latent_dim, prob, device):
+    if prob > 0 and random.random() < prob:
+        return make_noise(batch, latent_dim, 2, device)
+    else:
+        return [make_noise(batch, latent_dim, 1, device)]
 
 @torch.no_grad()
 def get_mean_style(generator, device):
@@ -175,6 +190,14 @@ def train(args, loader, sbg_generator, style_generator, style_discriminator, mpn
     # criterion_construct = nn.MSELoss()
     # criterion_reconstruct = nn.MSELoss().to(device)
 
+    if args.trunc:
+        truncation = 0.7
+        trunc = style_generator.mean_latent(4096).detach()
+        trunc.requires_grad_(False)
+    else:
+        truncation = 1
+        trunc = None
+
     style_generator.eval()
     style_generator.requires_grad_(False)
     sbg_generator.eval()
@@ -212,7 +235,11 @@ def train(args, loader, sbg_generator, style_generator, style_discriminator, mpn
         )
 
         wp_code = mpnet(sbg_img)
-        fake_img, _ = style_generator([wp_code], input_is_latent=True)
+        fake_img, _ = style_generator([wp_code],
+                                      input_is_latent=True,
+                                      truncation=truncation,
+                                      truncation_latent=trunc,
+                                      randomize_noise=False)
 
         fake_pred = style_discriminator(fake_img)
         real_pred = style_discriminator(real_img)
@@ -226,6 +253,20 @@ def train(args, loader, sbg_generator, style_generator, style_discriminator, mpn
         style_discriminator.zero_grad()
         d_loss.backward()
         d_optim.step()
+
+        d_regularize = i % args.d_reg_every == 0
+
+        if d_regularize:
+            real_img.requires_grad = True
+            real_pred = style_discriminator(real_img)
+            r1_loss = d_r1_loss(real_pred, real_img)
+
+            style_discriminator.zero_grad()
+            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+
+            d_optim.step()
+
+        loss_dict["r1"] = r1_loss
 
 
         ############# train mapping network #############
@@ -243,7 +284,11 @@ def train(args, loader, sbg_generator, style_generator, style_discriminator, mpn
         )
 
         wp_code = mpnet(sbg_img)
-        style_img, _ = style_generator([wp_code], input_is_latent=True)
+        style_img, _ = style_generator([wp_code],
+                                       input_is_latent=True,
+                                       truncation=truncation,
+                                       truncation_latent=trunc,
+                                       randomize_noise=False)
 
         # adv loss
         fake_pred = style_discriminator(style_img)
@@ -261,39 +306,75 @@ def train(args, loader, sbg_generator, style_generator, style_discriminator, mpn
         g_loss.backward()
         mp_optim.step()
 
+        ############# down sample image latent reconstruct #############
+        if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
+            mpnet.requires_grad_(True)
+            style_discriminator.requires_grad_(False)
+
+            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+
+            style_img, latent = style_generator(noise, return_latents=True)
+            _style_img = F.interpolate(style_img, size=(args.sbg_size, args.sbg_size), mode='area')
+            wp_code = mpnet(_style_img)
+
+            latent_recon_loss = F.mse_loss(wp_code, latent)
+
+            loss_dict["lrl"] = latent_recon_loss
+
+            mpnet.zero_grad()
+            (latent_recon_loss * args.lrl).backward()
+            mp_optim.step()
 
         ############# ############# #############
-
-        # cur_nimg += args.batch
-
         loss_reduced = reduce_loss_dict(loss_dict)
         d_loss_val = loss_reduced["d"].mean().item()
         adv_loss_val = loss_reduced["adv"].mean().item()
         mse_loss_val = loss_reduced["mse"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
+        if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
+            latent_recon_loss_val = loss_reduced["lrl"].mean().item()
 
         if get_rank() == 0:
-            pbar.set_description(
-                (
-                    f"mse: {mse_loss_val:.4f}; adv: {adv_loss_val:.4f};"
+            if args.ltnt_recon_every == 0:
+                pbar.set_description(
+                    (
+                        f"mse: {mse_loss_val:.4f}; adv: {adv_loss_val:.4f};"
+                    )
                 )
-            )
+            else:
+                pbar.set_description(
+                    (
+                        f"mse: {mse_loss_val:.4f}; adv: {adv_loss_val:.4f}; lrl: {latent_recon_loss_val:.4f}"
+                    )
+                )
 
             if wandb and args.wandb:
-                wandb.log(
-                    {
-                        "Discriminator": d_loss_val,
-                        "Adversarial": adv_loss_val,
-                        "MSE": mse_loss_val,
-                        "Real Score": real_score_val,
-                        "Fake Score": fake_score_val,
-                    }
-                )
+                if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
+                    wandb.log(
+                        {
+                            "Discriminator": d_loss_val,
+                            "Adversarial": adv_loss_val,
+                            "MSE": mse_loss_val,
+                            "Real Score": real_score_val,
+                            "Fake Score": fake_score_val,
+                            "latent reconstruction": latent_recon_loss_val,
+                        }
+                    )
+                else:
+                    wandb.log(
+                        {
+                            "Discriminator": d_loss_val,
+                            "Adversarial": adv_loss_val,
+                            "MSE": mse_loss_val,
+                            "Real Score": real_score_val,
+                            "Fake Score": fake_score_val,
+                        }
+                    )
 
-            if i % 1000 == 0:
+            if i % 500 == 0:
                 with torch.no_grad():
-                    # mpnet.eval()
+                    mpnet.eval()
 
                     z = sample_codes(8, args.z_dim, device)
 
@@ -324,7 +405,15 @@ def train(args, loader, sbg_generator, style_generator, style_discriminator, mpn
                         range=(-1, 1),
                     )
 
-            if i % 20000 == 0 and i != 0:
+                    if wandb and args.wandb:
+                        wandb.log(
+                            {
+                                "lr image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "hr image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                            }
+                        )
+
+            if i % 30000 == 0 and i != 0:
                 torch.save(
                     {
                         "style_g": style_g_module.state_dict(),
@@ -379,7 +468,10 @@ if __name__ == "__main__":
         default=None,
         help="path to finegan",
     )
-    parser.add_argument("--lr", type=float, default=0.002, help="learning rate")
+    parser.add_argument("--lr_mp", type=float, default=2e-3,
+                        help="mapping network learning rate")
+    parser.add_argument("--lr_d", type=float, default=2e-5,
+                        help="discriminator learning rate")
     parser.add_argument(
         "--channel_multiplier",
         type=int,
@@ -392,10 +484,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local_rank", type=int, default=0, help="local rank for distributed training"
     )
+    parser.add_argument("--d_reg_every", type=int, default=16)
+    parser.add_argument("--r1", type=float, default=10)
+    parser.add_argument(
+        "--trunc", action="store_true", help="use truncation"
+    )
+    parser.add_argument(
+        "--ltnt_recon_every", type=int, default=0, help="down sample images reconstruct"
+    )
+    parser.add_argument('--mp_arch', type=str, default='vanilla',
+                        help='model architectures (vanilla | encoder)')
 
     ## weights
     parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
-    parser.add_argument("--mse", type=float, default=1, help="weight of the mse loss")
+    parser.add_argument("--mse", type=float, default=1e2, help="weight of the mse loss")
+    parser.add_argument("--lrl", type=float, default=1e1, help="weight of the latent recon loss")
+
 
     args = parser.parse_args()
 
@@ -436,20 +540,28 @@ if __name__ == "__main__":
         code_dim=args.z_dim
     ).to(device)
 
-    mpnet = MappingNetwork(
-        num_ws=style_generator.n_latent,
-        w_dim=args.latent
-    ).to(device)
+    if args.mp_arch == 'vanilla':
+        mpnet = MappingNetwork(
+            num_ws=style_generator.n_latent,
+            w_dim=args.latent
+        ).to(device)
+    # https://github.com/bryandlee/stylegan2-encoder-pytorch
+    elif args.mp_arch == 'encoder':
+        mpnet = Encoder(
+            size=args.sbg_size,
+            num_ws=style_generator.n_latent,
+            w_dim=args.latent
+        ).to(device)
 
     d_optim = optim.Adam(
         style_discriminator.parameters(),
-        lr=args.lr,
+        lr=args.lr_d,
         betas=(0, 0.99),
     )
 
     mp_optim = optim.Adam(
         mpnet.parameters(),
-        lr=args.lr,
+        lr=args.lr_mp,
         betas=(0, 0.99),
     )
 
@@ -467,7 +579,8 @@ if __name__ == "__main__":
         pass
 
     style_generator.load_state_dict(style_dict["g_ema"], strict=False)
-    style_discriminator.load_state_dict(style_dict["d"], strict=False)
+    style_discriminator.load_state_dict(style_dict["d"])
+    # d_optim.load_state_dict(style_dict["d_optim"])
 
     assert args.sbg_model is not None
     print("load sbg model:", args.sbg_model)
