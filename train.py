@@ -16,10 +16,9 @@ import torch.distributed as dist
 from torchvision import transforms, utils
 from tqdm import tqdm
 from torch_utils import image_transforms
+from PIL import Image
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
-
-from model import Generator, MappingNetwork, G_NET
+from model import Generator, MappingNetwork, G_NET, Encoder
 from finegan_config import finegan_config
 
 # try:
@@ -28,6 +27,7 @@ import wandb
 # except ImportError:
 #     wandb = None
 
+from op import conv2d_gradfix
 from dataset import MultiResolutionDataset
 
 from distributed import (
@@ -92,11 +92,12 @@ def d_logistic_loss(real_pred, fake_pred):
 
 
 def d_r1_loss(real_pred, real_img):
-    grad_real, = autograd.grad(
-        outputs=real_pred.sum(), inputs=real_img, create_graph=True, only_inputs=True
-    )
-    # grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
-    grad_penalty = grad_real.square().sum([1,2,3])
+    with conv2d_gradfix.no_weight_gradients():
+        grad_real, = autograd.grad(
+            outputs=real_pred.sum(), inputs=real_img, create_graph=True
+        )
+    grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+
     return grad_penalty
 
 
@@ -126,6 +127,19 @@ def set_grad_none(model, targets):
         if n in targets:
             p.grad = None
 
+def make_noise(batch, latent_dim, n_noise, device):
+    if n_noise == 1:
+        return torch.randn(batch, latent_dim, device=device)
+    noises = torch.randn(n_noise, batch, latent_dim, device=device).unbind(0)
+    return noises
+
+
+def mixing_noise(batch, latent_dim, prob, device):
+    if prob > 0 and random.random() < prob:
+        return make_noise(batch, latent_dim, 2, device)
+    else:
+        return [make_noise(batch, latent_dim, 1, device)]
+
 def child_to_parent(c_code, c_dim, p_dim):
     ratio = c_dim / p_dim
     cid = torch.argmax(c_code,  dim=1)
@@ -147,7 +161,10 @@ def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
     return z, b, p, c
 
 
-def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['z', 'b', 'p', 'c']):
+def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['b', 'p']):
+    '''
+    rand code default: keeping z and c
+    '''
     batch = prev_z.size(0)
     if 'z' in rand_code:
         z = torch.randn(batch, prev_z.size(1), device=device)
@@ -180,32 +197,46 @@ def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['z', 'b
 
     return z, b, p, c
 
-
-def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
+def train(args, loader, fine_generator, style_generator, style_discriminator, mpnet, mp_optim, d_optim, device):
+    loader = sample_data(loader)
 
     pbar = range(args.iter)
 
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
-    cur_nimg = 0
+    # cur_nimg = 0
     loss_dict = {}
 
     if args.distributed:
         mp_module = mpnet.module
+        fine_g_module = fine_generator.module
+        style_g_module = style_generator.module
+        style_d_module = style_discriminator.module
     else:
         mp_module = mpnet
+        fine_g_module = fine_generator
+        style_g_module = style_generator
+        style_d_module = style_discriminator
 
 
     # criterion_construct = nn.MSELoss()
-    criterion_reconstruct = nn.MSELoss().to(device)
+    # criterion_reconstruct = nn.MSELoss().to(device)
+
+    if args.trunc:
+        truncation = 0.7
+        trunc = style_generator.mean_latent(4096).detach()
+        trunc.requires_grad_(False)
+    else:
+        truncation = 1
+        trunc = None
 
     style_generator.eval()
     style_generator.requires_grad_(False)
     fine_generator.eval()
     fine_generator.requires_grad_(False)
-    mpnet.train()
-    mpnet.requires_grad_(True)
+    style_discriminator.train()
+
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -214,61 +245,165 @@ def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
             print("Done!")
             break
 
-        ############# train child discriminator #############
+        real_img = next(loader)
+        real_img = real_img.to(device)
+
+        mpnet.train()
+
+        ############# train discriminator #############
+        mpnet.requires_grad_(False)
+        style_discriminator.requires_grad_(True)
+
         z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-        z, b, p, c = rand_sample_codes(z, b, p, c, device)
+        if not args.tie_code:
+            z, b, p, c = rand_sample_codes(z, b, p, c, device)
 
         fine_img = fine_generator(z, b, p, c)
-
-        utils.save_image(
-            fine_img,
-            f"tt.png",
-            nrow=8,
-            normalize=True,
-            range=(-1, 1),
-        )
-
-        sys
-
         wp_code = mpnet(fine_img)
-        style_img, _ = style_generator([wp_code], input_is_latent=True)
 
+        fake_img, _ = style_generator([wp_code],
+                                      input_is_latent=True,
+                                      truncation=truncation,
+                                      truncation_latent=trunc,
+                                      randomize_noise=False)
+
+        fake_pred = style_discriminator(fake_img)
+        real_pred = style_discriminator(real_img)
+
+        d_loss = d_logistic_loss(real_pred, fake_pred)
+
+        loss_dict["d"] = d_loss
+        loss_dict["real_score"] = real_pred.mean()
+        loss_dict["fake_score"] = fake_pred.mean()
+
+        style_discriminator.zero_grad()
+        d_loss.backward()
+        d_optim.step()
+
+        d_regularize = i % args.d_reg_every == 0
+
+        if d_regularize:
+            real_img.requires_grad = True
+            real_pred = style_discriminator(real_img)
+            r1_loss = d_r1_loss(real_pred, real_img)
+
+            style_discriminator.zero_grad()
+            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+
+            d_optim.step()
+
+        loss_dict["r1"] = r1_loss
+
+
+        ############# train mapping network #############
+        mpnet.requires_grad_(True)
+        style_discriminator.requires_grad_(False)
+
+        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if not args.tie_code:
+            z, b, p, c = rand_sample_codes(z, b, p, c, device)
+
+        fine_img = fine_generator(z, b, p, c)
+        wp_code = mpnet(fine_img)
+
+        style_img, _ = style_generator([wp_code],
+                                       input_is_latent=True,
+                                       truncation=truncation,
+                                       truncation_latent=trunc,
+                                       randomize_noise=False)
+
+        # adv loss
+        fake_pred = style_discriminator(style_img)
+        adv_loss = g_nonsaturating_loss(fake_pred)
+        loss_dict["adv"] = adv_loss
+
+        # mse loss
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-        recon_loss = criterion_reconstruct(_style_img, fine_img)
+        mse_loss = F.mse_loss(_style_img, fine_img)
+        loss_dict["mse"] = mse_loss
+
+        g_loss = adv_loss * args.adv + mse_loss * args.mse
 
         mpnet.zero_grad()
-        recon_loss.backward()
+        g_loss.backward()
         mp_optim.step()
 
-        cur_nimg += args.batch
+        ############# down sample image latent reconstruct #############
+        if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
+            mpnet.requires_grad_(True)
+            style_discriminator.requires_grad_(False)
 
+            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+
+            style_img, latent = style_generator(noise, return_latents=True)
+            _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
+            wp_code = mpnet(_style_img)
+
+            latent_recon_loss = F.mse_loss(wp_code, latent)
+
+            loss_dict["lrl"] = latent_recon_loss
+
+            mpnet.zero_grad()
+            (latent_recon_loss * args.lrl).backward()
+            mp_optim.step()
+
+        ############# ############# #############
         loss_reduced = reduce_loss_dict(loss_dict)
-
-        recon_loss_val = loss_reduced["recon"].mean().item()
+        d_loss_val = loss_reduced["d"].mean().item()
+        adv_loss_val = loss_reduced["adv"].mean().item()
+        mse_loss_val = loss_reduced["mse"].mean().item()
+        real_score_val = loss_reduced["real_score"].mean().item()
+        fake_score_val = loss_reduced["fake_score"].mean().item()
+        if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
+            latent_recon_loss_val = loss_reduced["lrl"].mean().item()
 
         if get_rank() == 0:
-            pbar.set_description(
-                (
-                    f"recon: {recon_loss_val:.4f}; "
+            if args.ltnt_recon_every == 0:
+                pbar.set_description(
+                    (
+                        f"mse: {mse_loss_val:.4f}; adv: {adv_loss_val:.4f};"
+                    )
                 )
-            )
+            else:
+                pbar.set_description(
+                    (
+                        f"mse: {mse_loss_val:.4f}; adv: {adv_loss_val:.4f}; lrl: {latent_recon_loss_val:.4f}"
+                    )
+                )
 
             if wandb and args.wandb:
-                wandb.log(
-                    {
-                        "Reconstruction": recon_loss_val,
-                    }
-                )
+                if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
+                    wandb.log(
+                        {
+                            "Discriminator": d_loss_val,
+                            "Adversarial": adv_loss_val,
+                            "MSE": mse_loss_val,
+                            "Real Score": real_score_val,
+                            "Fake Score": fake_score_val,
+                            "latent reconstruction": latent_recon_loss_val,
+                        }
+                    )
+                else:
+                    wandb.log(
+                        {
+                            "Discriminator": d_loss_val,
+                            "Adversarial": adv_loss_val,
+                            "MSE": mse_loss_val,
+                            "Real Score": real_score_val,
+                            "Fake Score": fake_score_val,
+                        }
+                    )
 
-            if i % 1000 == 0:
+            if i % 500 == 0:
                 with torch.no_grad():
-                    # mpnet.eval()
+                    mpnet.eval()
 
-                    z, b, p, c = sample_codes(args.n_sample, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                    z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     z, b, p, c = rand_sample_codes(z, b, p, c, device)
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
+
                     style_img, _ = style_generator([wp_code], input_is_latent=True)
 
                     utils.save_image(
@@ -287,8 +422,25 @@ def train(args, fine_generator, style_generator, mpnet, mp_optim, device):
                         range=(-1, 1),
                     )
 
-            if i % 100000 == 0 and i != 0:
-                torch.save(mp_module.state_dict(),
+                    if wandb and args.wandb:
+                        wandb.log(
+                            {
+                                "lr image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "hr image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                            }
+                        )
+
+            if i % 10000 == 0 and i != 0:
+                torch.save(
+                    {
+                        "style_g": style_g_module.state_dict(),
+                        "style_d": style_d_module.state_dict(),
+                        "fine": fine_g_module.state_dict(),
+                        "mp": mp_module.state_dict(),
+                        "mp_optim": mp_optim.state_dict(),
+                        "d_optim": d_optim.state_dict(),
+                        "args": args,
+                    },
                     f"checkpoint/{str(i).zfill(6)}.pt",
                 )
 
@@ -298,6 +450,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="mpnet trainer")
 
+    parser.add_argument("path", type=str, help="path to the lmdb dataset")
     parser.add_argument('--arch', type=str, default='stylegan2', help='model architectures (stylegan2 | swagan)')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
@@ -329,7 +482,10 @@ if __name__ == "__main__":
         default=None,
         help="path to finegan",
     )
-    parser.add_argument("--lr", type=float, default=0.002, help="learning rate")
+    parser.add_argument("--lr_mp", type=float, default=2e-3,
+                        help="mapping network learning rate")
+    parser.add_argument("--lr_d", type=float, default=2e-5,
+                        help="discriminator learning rate")
     parser.add_argument(
         "--channel_multiplier",
         type=int,
@@ -342,7 +498,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local_rank", type=int, default=0, help="local rank for distributed training"
     )
-
+    parser.add_argument("--d_reg_every", type=int, default=16)
+    parser.add_argument("--r1", type=float, default=10)
+    parser.add_argument(
+        "--trunc", action="store_true", help="use truncation"
+    )
+    parser.add_argument(
+        "--ltnt_recon_every", type=int, default=0, help="down sample images reconstruct"
+    )
+    parser.add_argument('--mp_arch', type=str, default='encoder',
+                        help='model architectures (vanilla | encoder)')
+    parser.add_argument(
+        "--tie_code", action="store_true", help="use tied codes"
+    )
+    parser.add_argument('--ds_name', type=str, default='LSUNCAR',
+                        help='dataset used for training finegan (LSUNCAR | CUB)')
+    ## weights
+    parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
+    parser.add_argument("--mse", type=float, default=1e2, help="weight of the mse loss")
+    parser.add_argument("--lrl", type=float, default=1e1, help="weight of the latent recon loss")
 
     args = parser.parse_args()
 
@@ -359,10 +533,10 @@ if __name__ == "__main__":
 
     args.start_iter = 0
 
-    args.z_dim = finegan_config['Z_DIM']
-    args.b_dim = finegan_config['FINE_GRAINED_CATEGORIES']
-    args.p_dim = finegan_config['SUPER_CATEGORIES']
-    args.c_dim = finegan_config['FINE_GRAINED_CATEGORIES']
+    args.z_dim = finegan_config[args.ds_name]['Z_DIM']
+    args.b_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
+    args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
+    args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
     if args.arch == 'stylegan2':
         from model import Generator, Discriminator
@@ -377,16 +551,35 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    mpnet = MappingNetwork(
-        num_ws=style_generator.n_latent,
-        w_dim=args.latent
+    style_discriminator = Discriminator(
+        size=args.size,
+        channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    fine_generator = G_NET().to(device)
+    fine_generator = G_NET(ds_name=args.ds_name).to(device)
+
+    if args.mp_arch == 'vanilla':
+        mpnet = MappingNetwork(
+            num_ws=style_generator.n_latent,
+            w_dim=args.latent
+        ).to(device)
+    # https://github.com/bryandlee/stylegan2-encoder-pytorch
+    elif args.mp_arch == 'encoder':
+        mpnet = Encoder(
+            size=128,
+            num_ws=style_generator.n_latent,
+            w_dim=args.latent
+        ).to(device)
+
+    d_optim = optim.Adam(
+        style_discriminator.parameters(),
+        lr=args.lr_d,
+        betas=(0, 0.99),
+    )
 
     mp_optim = optim.Adam(
         mpnet.parameters(),
-        lr=args.lr,
+        lr=args.lr_mp,
         betas=(0, 0.99),
     )
 
@@ -403,21 +596,28 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    style_generator.load_state_dict(style_dict["g"])
+    style_generator.load_state_dict(style_dict["g_ema"], strict=False)
+    style_discriminator.load_state_dict(style_dict["d"])
+    # d_optim.load_state_dict(style_dict["d_optim"])
 
     assert args.fine_model is not None
     print("load fine model:", args.fine_model)
 
     fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
-    fine_generator.load_state_dict(fine_dict)
 
-    # torch.save(fine_generator.module.state_dict(),
-    #     f"../data/fine_model/lsuncar1600k.pt",
-    # )
+    # sbg_generator.load_state_dict(fine_dict['generator'])
+    fine_generator.load_state_dict(fine_dict)
 
     if args.distributed:
         style_generator = nn.parallel.DistributedDataParallel(
             style_generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
+        style_discriminator = nn.parallel.DistributedDataParallel(
+            style_discriminator,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -430,8 +630,31 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
+        mpnet = nn.parallel.DistributedDataParallel(
+            mpnet,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
+    transform = transforms.Compose(
+        [
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+        ]
+    )
+
+    dataset = MultiResolutionDataset(args.path, transform, args.size)
+    loader = data.DataLoader(
+        dataset,
+        batch_size=args.batch,
+        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
+        drop_last=True,
+    )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="mapping net")
+        wandb.init(project="map net")
 
-    train(args, fine_generator, style_generator, mpnet, mp_optim, device)
+    train(args, loader, fine_generator, style_generator, style_discriminator, mpnet, mp_optim, d_optim, device)
