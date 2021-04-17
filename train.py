@@ -377,6 +377,10 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
+    discriminator = Discriminator(
+        args.size, channel_multiplier=args.channel_multiplier
+    ).to(device)
+
     mpnet = MappingNetwork(
         num_ws=style_generator.n_latent,
         w_dim=args.latent

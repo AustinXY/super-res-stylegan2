@@ -2,7 +2,7 @@ import argparse
 import math
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import torch
 from torch import optim
@@ -114,19 +114,11 @@ if __name__ == "__main__":
         default=0.75,
         help="duration of the noise level decay",
     )
-    parser.add_argument("--step", type=int, default=1000, help="optimize iterations")
     parser.add_argument(
         "--noise_regularize",
         type=float,
         default=1e5,
         help="weight of the noise regularization",
-    )
-    parser.add_argument("--mse", type=float, default=1, help="weight of the mse loss")
-    parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
-    parser.add_argument(
-        "--w_plus",
-        action="store_true",
-        help="allow to use distinct latent codes to each layers",
     )
     parser.add_argument(
         "files", metavar="FILES", nargs="+", help="path to image files to be projected"
@@ -135,7 +127,7 @@ if __name__ == "__main__":
     ## parse argument
     parser.add_argument('--seed', type=int, help='manual seed to use')
     parser.add_argument('--loss_str', type=str,
-                        default="100*L2+0.05*GEOCROSS", help='Loss function to use')
+                        default="100*l2+0.05*geo", help='Loss function to use')
     parser.add_argument('--eps', type=float, default=1e-3,
                         help='Target for downscaling loss (L2)')
     parser.add_argument('--noise_type', type=str,
@@ -158,18 +150,32 @@ if __name__ == "__main__":
                         help='Whether to store and save intermediate HR and LR images during optimization')
     parser.add_argument('--verbose', action='store_false',
                         help='using verbose mode')
+
+    parser.add_argument("--l2", type=float, default=100, help="weight of the l2 loss")
+    parser.add_argument("--l1", type=float, default=0, help="weight of the l1 loss")
+    parser.add_argument("--geo", type=float, default=0.05, help="weight of the geo loss")
+    parser.add_argument("--adv", type=float, default=0, help="weight of the adv loss")
     args = parser.parse_args()
 
-    # resize = min(args.size, 256)
+    resize = min(args.size, 128)
 
     transform = transforms.Compose(
         [
-            # transforms.Resize(resize),
-            # transforms.CenterCrop(resize),
+            transforms.Resize(resize),
+            transforms.CenterCrop(resize),
             transforms.ToTensor(),
             # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ]
     )
+
+    weights = {
+        'l2': args.l2,
+        'l1': args.l1,
+        'geo': args.geo,
+        'adv': args.adv
+    }
+
+    print(weights)
 
     imgs = []
 
@@ -184,14 +190,14 @@ if __name__ == "__main__":
     g_ema.eval()
     g_ema = g_ema.to(device)
 
-    model = PULSE(g_ema, device, verbose=args.verbose)
-
     discriminator = Discriminator(args.size).to(device)
     discriminator.load_state_dict(torch.load(args.ckpt)["d"])
     discriminator.eval()
     discriminator.requires_grad_(False)
 
-    img_gen = model(
+    model = PULSE(g_ema, discriminator, args.size, weights, device, verbose=args.verbose)
+
+    img_gen, img_gen_lr = model(
         ref_im = imgs,
         seed = args.seed,
         loss_str = args.loss_str,
@@ -212,6 +218,14 @@ if __name__ == "__main__":
     utils.save_image(
         img_gen,
         f"pulse_project/project.png",
+        nrow=8,
+        normalize=True,
+        range=(0, 1),
+    )
+
+    utils.save_image(
+        img_gen_lr,
+        f"pulse_project/project_lr.png",
         nrow=8,
         normalize=True,
         range=(0, 1),

@@ -885,8 +885,8 @@ class GET_MASK_G(nn.Module):
         super(GET_MASK_G, self).__init__()
         self.gf_dim = ngf
         self.img = nn.Sequential(
-            # conv3x3(ngf, 1),
-            nn.Conv2d(ngf, 1, 1),
+            conv3x3(ngf, 1),
+            # nn.Conv2d(ngf, 1, 1),
             nn.Sigmoid()
         )
 
@@ -925,7 +925,7 @@ class G_NET(nn.Module):
         # Child mask generation network
         self.img_net3_mask = GET_MASK_G(self.gf_dim // 4)
 
-    def forward(self, z_code, bg_code, p_code, c_code):
+    def forward(self, z_code, bg_code, p_code, c_code, rtn_img='fnl'):
 
         fake_imgs = []  # Will contain [background image, parent image, child image]
         fg_imgs = []  # Will contain [parent foreground, child foreground]
@@ -969,7 +969,13 @@ class G_NET(nn.Module):
         mk_imgs.append(fake_img3_mask)
 
         # return fake_imgs, fg_imgs, mk_imgs, fg_mk
-        return fake_img3_final
+        rtn = fake_img3_final
+        if rtn_img == 'pmk':
+            rtn = fake_img2_mask
+        elif rtn_img == 'bg':
+            rtn = fake_img1
+
+        return rtn
 
 #----------------------------------------------------------------------------
 

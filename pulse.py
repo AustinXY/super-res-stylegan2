@@ -13,11 +13,14 @@ from tqdm import tqdm
 
 
 class PULSE(torch.nn.Module):
-    def __init__(self, generator, device, verbose=True):
+    def __init__(self, generator, discriminator, size, weights, device, verbose=True):
         super(PULSE, self).__init__()
 
         self.generator = generator
+        self.discriminator = discriminator
         self.verbose = verbose
+        self.size = size
+        self.weights = weights
 
         for param in self.generator.parameters():
             param.requires_grad = False
@@ -88,7 +91,7 @@ class PULSE(torch.nn.Module):
         schedule_func = schedule_dict[lr_schedule]
         scheduler = torch.optim.lr_scheduler.LambdaLR(opt.opt, schedule_func)
 
-        loss_builder = LossBuilder(ref_im, loss_str, n_latent, eps).cuda()
+        loss_builder = LossBuilder(self.discriminator, self.size, ref_im, n_latent, eps, self.weights).cuda()
 
         min_loss = np.inf
         best_summary = ""
@@ -102,7 +105,7 @@ class PULSE(torch.nn.Module):
             opt.opt.zero_grad()
 
             # Duplicate latent in case tile_latent = True
-            if (tile_latent):
+            if tile_latent:
                 latent_in = latent.expand(-1, n_latent, -1)
             else:
                 latent_in = latent
@@ -116,7 +119,14 @@ class PULSE(torch.nn.Module):
 
             # Calculate Losses
             loss, loss_dict = loss_builder(latent_in, gen_im)
-            loss_dict['TOTAL'] = loss
+            loss_dict['TOTAL'] = loss.item()
+
+            pbar.set_description(
+                (
+                    f"l2: {loss_dict['l2']:.4f}; l1: {loss_dict['l1']:.4f}; "
+                    f"geo: {loss_dict['geo']:.4f}; adv: {loss_dict['adv']:.4f};"
+                )
+            )
 
             # Save best summary for log
             if loss < min_loss:
@@ -137,6 +147,6 @@ class PULSE(torch.nn.Module):
         current_info = f' | time: {total_t:.1f} | it/s: {(j+1)/total_t:.2f} | batchsize: {batch_size}'
         if self.verbose: print(best_summary+current_info)
 
-        return gen_im.clamp(0, 1)
+        return gen_im.clamp(0, 1), loss_builder.D(best_im).clamp(0, 1)
 
         # yield (gen_im.clone().cpu().detach().clamp(0, 1),loss_builder.D(best_im).cpu().detach().clamp(0, 1))

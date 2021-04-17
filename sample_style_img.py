@@ -115,7 +115,7 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    style_generator.load_state_dict(style_dict["g"], strict=False)
+    style_generator.load_state_dict(style_dict["g_ema"], strict=False)
     style_generator.eval()
     discriminator.load_state_dict(style_dict["d"], strict=False)
     discriminator.eval()

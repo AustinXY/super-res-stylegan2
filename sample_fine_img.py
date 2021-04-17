@@ -35,8 +35,10 @@ def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
     return z, b, p, c
 
 
-def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['z', 'b', 'p', 'c']):
+def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, rand_code=['z', 'b', 'p', 'c']):
     batch = prev_z.size(0)
+    device = prev_z.device
+
     if 'z' in rand_code:
         z = torch.randn(batch, prev_z.size(1), device=device)
     else:
@@ -69,6 +71,20 @@ def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['z', 'b
     return z, b, p, c
 
 
+def manual_sample_codes(code, code_id):
+    _code = torch.zeros(code.size(0), code.size(1), device=code.device)
+    for i in range(code.size(0)):
+        if i >= len(code_id):
+            _id = code_id[-1]
+        else:
+            _id = code_id[i]
+        if _id >= code.size(1):
+            _id = 0
+        _code[i, _id] = 1
+
+    return _code
+
+
 if __name__ == "__main__":
     device = "cuda"
 
@@ -95,6 +111,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ds_name", type=str, default='CUB', help="name of dataset"
     )
+    parser.add_argument(
+        "--rtn_img", type=str, default='fnl', help="return image type"
+    )
     args = parser.parse_args()
 
     args.z_dim = finegan_config[args.ds_name]['Z_DIM']
@@ -103,6 +122,7 @@ if __name__ == "__main__":
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
     fine_generator = G_NET(args.ds_name).to(device)
+    # fine_generator = torch.nn.DataParallel(fine_generator)
     # print(fine_generator)
 
     assert args.fine_model is not None
@@ -118,12 +138,17 @@ if __name__ == "__main__":
         z, b, p, c = sample_codes(args.batch, args.z_dim,
                                 args.b_dim, args.p_dim, args.c_dim, device)
         for i in range(args.n_sample):
-            fine_img = fine_generator(z, b, p, c)
+            # p = manual_sample_codes(p, [i])
+            fine_img = fine_generator(z, b, p, c, rtn_img=args.rtn_img)
+            # fine_img = fine_generator(z, b, p, c, rtn_img='pmk')
             img_li.append(fine_img)
-            z, b, p, c = rand_sample_codes(z, b, p, c, device, rand_code=args.rand_code)
-
+            z, b, p, c = rand_sample_codes(z, b, p, c, rand_code=args.rand_code)
 
         fnl_img = None
+
+        _range = (-1, 1)
+        if args.rtn_img == 'pmk':
+            _range = (0, 1)
 
         for i in range(len(img_li)):
 
@@ -137,7 +162,7 @@ if __name__ == "__main__":
                 f"fine_sample/fine{str(i)}.png",
                 nrow=8,
                 normalize=True,
-                range=(-1, 1),
+                range=_range,
             )
 
         utils.save_image(
@@ -145,5 +170,5 @@ if __name__ == "__main__":
             f"fine_sample/fine.png",
             nrow=8,
             normalize=True,
-            range=(-1, 1),
+            range=_range,
         )

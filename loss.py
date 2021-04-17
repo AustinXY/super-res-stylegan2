@@ -12,6 +12,7 @@ import torch
 from torch_utils import training_stats
 from torch_utils import misc
 from torch_utils.ops import conv2d_gradfix
+from torch.nn import functional as F
 
 #----------------------------------------------------------------------------
 
@@ -137,17 +138,18 @@ class StyleGAN2Loss(Loss):
 # pulse
 #----------------------------------------------------------------------------
 class LossBuilder(torch.nn.Module):
-    def __init__(self, ref_im, loss_str, n_latent, eps):
+    def __init__(self, discriminator, size, ref_im, n_latent, eps, weights):
         super(LossBuilder, self).__init__()
         self.n_latent = n_latent
+        self.weights = weights
+        self.discriminator = discriminator
+
         assert ref_im.shape[2] == ref_im.shape[3]
         im_size = ref_im.shape[2]
-        factor = 256//im_size
-        assert im_size*factor == 256
+        factor = size // im_size
+        assert im_size * factor == size
         self.D = BicubicDownSample(factor=factor)
         self.ref_im = ref_im
-        self.parsed_loss = [loss_term.split('*')
-                            for loss_term in loss_str.split('+')]
         self.eps = eps
 
     # Takes a list of tensors, flattens them, and concatenates them into a vector
@@ -164,8 +166,8 @@ class LossBuilder(torch.nn.Module):
 
     # Uses geodesic distance on sphere to sum pairwise distances of the 18 vectors
     def _loss_geocross(self, latent, **kwargs):
-        if(latent.shape[1] == 1):
-            return 0
+        if latent.shape[1] == 1:
+            return torch.zeros(1, device=latent.device)
         else:
             X = latent.view(-1, 1, self.n_latent, 512)
             Y = latent.view(-1, self.n_latent, 1, 512)
@@ -175,21 +177,27 @@ class LossBuilder(torch.nn.Module):
             D = ((D.pow(2)*512).mean((1, 2))/8.).sum()
             return D
 
+    def _loss_adv(self, gen_im):
+        fake_pred = self.discriminator(gen_im)
+        loss = F.softplus(-fake_pred).mean()
+        return loss
+
     def forward(self, latent, gen_im):
-        var_dict = {'latent': latent,
-                    'gen_im_lr': self.D(gen_im),
-                    'ref_im': self.ref_im,
-                    }
-        loss = 0
-        loss_fun_dict = {
-            'L2': self._loss_l2,
-            'L1': self._loss_l1,
-            'GEOCROSS': self._loss_geocross,
-        }
+        gen_im_lr = self.D(gen_im)
         losses = {}
 
-        for weight, loss_type in self.parsed_loss:
-            tmp_loss = loss_fun_dict[loss_type](**var_dict)
-            losses[loss_type] = tmp_loss
-            loss += float(weight)*tmp_loss
+        l2_loss = self._loss_l2(gen_im_lr, self.ref_im)
+        l1_loss = self._loss_l1(gen_im_lr, self.ref_im)
+        geo_loss = self._loss_geocross(latent)
+        adv_loss = self._loss_adv(gen_im)
+
+        loss = l2_loss * self.weights['l2'] + geo_loss * self.weights['geo'] + \
+            adv_loss * self.weights['adv'] + l1_loss * self.weights['l1']
+
+        losses = {
+            'l2': l2_loss.item(),
+            'l1': l1_loss.item(),
+            'geo': geo_loss.item(),
+            'adv': adv_loss.item()
+        }
         return loss, losses
