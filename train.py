@@ -39,6 +39,7 @@ from distributed import (
 )
 from non_leaking import augment, AdaptiveAugment
 
+# os.environ['PYTHONWARNINGS'] = 'ignore:semaphore_tracker:UserWarning'
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -398,7 +399,7 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
                 with torch.no_grad():
                     mpnet.eval()
 
-                    z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                    z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     z, b, p, c = rand_sample_codes(z, b, p, c, device)
 
                     fine_img = fine_generator(z, b, p, c)
@@ -430,7 +431,7 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
                             }
                         )
 
-            if i % 10000 == 0 and i != 0:
+            if i % 20000 == 0 and i != 0:
                 torch.save(
                     {
                         "style_g": style_g_module.state_dict(),
