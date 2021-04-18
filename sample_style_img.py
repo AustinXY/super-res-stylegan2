@@ -107,14 +107,6 @@ if __name__ == "__main__":
     print("load style model:", args.style_model)
 
     style_dict = torch.load(args.style_model, map_location=lambda storage, loc: storage)
-
-    try:
-        ckpt_name = os.path.basename(args.style_model)
-        args.start_iter = int(os.path.splitext(ckpt_name)[0])
-
-    except ValueError:
-        pass
-
     style_generator.load_state_dict(style_dict["g_ema"], strict=False)
     style_generator.eval()
     discriminator.load_state_dict(style_dict["d"], strict=False)
