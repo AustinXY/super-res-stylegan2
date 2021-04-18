@@ -5,4 +5,6 @@
 3. project fineGAN images using PULSE projector<br>
 ``python3 pulse_projector.py --ckpt ../data/style_model/110000.pt --size 512 --steps 1000 fine_sample/fine0.png fine_sample/fine1.png fine_sample/fine2.png fine_sample/fine3.png fine_sample/fine4.png fine_sample/fine5.png fine_sample/fine6.png fine_sample/fine7.png``<br><br>
 4. test ffhq super res<br>
-``python3 train.py --batch 8 --style_model ../data/style_model/ffhq_256_550k.pt --sbg_model ../data/sbg_model/stylegan-128px-running-100000.model ../data/LMDB/ffhq_256_lmdb/``
+``python3 train.py --batch 8 --style_model ../data/style_model/ffhq_256_550k.pt --sbg_model ../data/sbg_model/stylegan-128px-running-100000.model ../data/LMDB/ffhq_256_lmdb/``<br><br>
+5. map fineGAN images using trained mapping network<br>
+``python3 sample_map2style.py --ckpt checkpoint/080000.pt fine_sample``
