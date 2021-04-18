@@ -7,4 +7,6 @@
 4. test ffhq super res<br>
 ``python3 train.py --batch 8 --style_model ../data/style_model/ffhq_256_550k.pt --sbg_model ../data/sbg_model/stylegan-128px-running-100000.model ../data/LMDB/ffhq_256_lmdb/``<br><br>
 5. map fineGAN images using trained mapping network<br>
-``python3 sample_map2style.py --ckpt checkpoint/080000.pt fine_sample``
+``python3 sample_map2style.py --ckpt checkpoint/080000.pt fine_sample``<br><br>
+6. train mapping network<br>
+``python3 train.py --batch 4 --size 512 --wandb --ckpt checkpoint/080000.pt --style_model ../data/style_model/lsuncar_512_290k.pt  ../data/LMDB/lsun100k_lmdb/``
