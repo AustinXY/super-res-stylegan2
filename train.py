@@ -39,6 +39,8 @@ from distributed import (
 )
 from non_leaking import augment, AdaptiveAugment
 
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
+
 # os.environ['PYTHONWARNINGS'] = 'ignore:semaphore_tracker:UserWarning'
 
 def weights_init(m):
@@ -513,7 +515,7 @@ if __name__ == "__main__":
         "--tie_code", action="store_true", help="use tied codes"
     )
     parser.add_argument('--ds_name', type=str, default='LSUNCAR',
-                        help='dataset used for training finegan (LSUNCAR | CUB)')
+                        help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
     ## weights
     parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
     parser.add_argument("--mse", type=float, default=1e2, help="weight of the mse loss")
@@ -585,29 +587,38 @@ if __name__ == "__main__":
     )
 
 
-    assert args.style_model is not None
-    print("load style model:", args.style_model)
+    if args.ckpt is not None:
+        print("load model:", args.ckpt)
 
-    style_dict = torch.load(args.style_model, map_location=lambda storage, loc: storage)
+        ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-    try:
-        ckpt_name = os.path.basename(args.style_model)
-        args.start_iter = int(os.path.splitext(ckpt_name)[0])
+        try:
+            ckpt_name = os.path.basename(args.ckpt)
+            args.start_iter = int(os.path.splitext(ckpt_name)[0])
+        except ValueError:
+            pass
 
-    except ValueError:
-        pass
+        style_generator.load_state_dict(ckpt["style_g"])
+        style_discriminator.load_state_dict(ckpt["style_d"])
+        fine_generator.load_state_dict(ckpt["fine"])
+        mpnet.load_state_dict(ckpt["mp"])
 
-    style_generator.load_state_dict(style_dict["g_ema"], strict=False)
-    style_discriminator.load_state_dict(style_dict["d"])
-    # d_optim.load_state_dict(style_dict["d_optim"])
+        mp_optim.load_state_dict(ckpt["mp_optim"])
+        d_optim.load_state_dict(ckpt["d_optim"])
 
-    assert args.fine_model is not None
-    print("load fine model:", args.fine_model)
+    # if specify stylegan checkpoint, overwrite stylegan from ckpt
+    if args.style_model is not None:
+        print("load style model:", args.style_model)
+        style_dict = torch.load(args.style_model, map_location=lambda storage, loc: storage)
+        style_generator.load_state_dict(style_dict["g_ema"], strict=False)
+        style_discriminator.load_state_dict(style_dict["d"])
+        # d_optim.load_state_dict(style_dict["d_optim"])
 
-    fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
-
-    # sbg_generator.load_state_dict(fine_dict['generator'])
-    fine_generator.load_state_dict(fine_dict)
+    # if specify finegan checkpoint, overwrite finegan from ckpt
+    if args.fine_model is not None:
+        print("load fine model:", args.fine_model)
+        fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
+        fine_generator.load_state_dict(fine_dict)
 
     if args.distributed:
         style_generator = nn.parallel.DistributedDataParallel(

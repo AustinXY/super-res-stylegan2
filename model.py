@@ -885,8 +885,8 @@ class GET_MASK_G(nn.Module):
         super(GET_MASK_G, self).__init__()
         self.gf_dim = ngf
         self.img = nn.Sequential(
-            conv3x3(ngf, 1),
-            # nn.Conv2d(ngf, 1, 1),
+            # conv3x3(ngf, 1),
+            nn.Conv2d(ngf, 1, 1),
             nn.Sigmoid()
         )
 
