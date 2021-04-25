@@ -164,10 +164,11 @@ def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
     return z, b, p, c
 
 
-def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, device, rand_code=['b', 'p']):
+def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, rand_code=['b', 'p']):
     '''
     rand code default: keeping z and c
     '''
+    device = prev_z.device
     batch = prev_z.size(0)
     if 'z' in rand_code:
         z = torch.randn(batch, prev_z.size(1), device=device)
@@ -259,7 +260,7 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
 
         z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
         if not args.tie_code:
-            z, b, p, c = rand_sample_codes(z, b, p, c, device)
+            z, b, p, c = rand_sample_codes(z, b, p, c)
 
         fine_img = fine_generator(z, b, p, c)
         wp_code = mpnet(fine_img)
@@ -304,7 +305,7 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
 
         z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
         if not args.tie_code:
-            z, b, p, c = rand_sample_codes(z, b, p, c, device)
+            z, b, p, c = rand_sample_codes(z, b, p, c)
 
         fine_img = fine_generator(z, b, p, c)
         wp_code = mpnet(fine_img)
@@ -402,7 +403,7 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
                     mpnet.eval()
 
                     z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-                    z, b, p, c = rand_sample_codes(z, b, p, c, device)
+                    z, b, p, c = rand_sample_codes(z, b, p, c)
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)

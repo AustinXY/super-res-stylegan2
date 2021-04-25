@@ -138,11 +138,11 @@ if __name__ == "__main__":
         z, b, p, c = sample_codes(args.batch, args.z_dim,
                                 args.b_dim, args.p_dim, args.c_dim, device)
         for i in range(args.n_sample):
-            # p = manual_sample_codes(p, [i])
+            p = manual_sample_codes(p, [i+10])
             fine_img = fine_generator(z, b, p, c, rtn_img=args.rtn_img)
             # fine_img = fine_generator(z, b, p, c, rtn_img='pmk')
             img_li.append(fine_img)
-            z, b, p, c = rand_sample_codes(z, b, p, c, rand_code=args.rand_code)
+            # z, b, p, c = rand_sample_codes(z, b, p, c, rand_code=args.rand_code)
 
         fnl_img = None
 

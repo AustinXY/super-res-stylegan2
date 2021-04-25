@@ -885,8 +885,8 @@ class GET_MASK_G(nn.Module):
         super(GET_MASK_G, self).__init__()
         self.gf_dim = ngf
         self.img = nn.Sequential(
-            # conv3x3(ngf, 1),
-            nn.Conv2d(ngf, 1, 1),
+            conv3x3(ngf, 1),
+            # nn.Conv2d(ngf, 1, 1),
             nn.Sigmoid()
         )
 
@@ -1073,3 +1073,119 @@ class Encoder(nn.Module):
     def forward(self, input):
         out = self.convs(input)
         return out.view(len(input), self.n_latents, self.w_dim)
+
+
+class LinearModule(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super().__init__()
+        # self.fc = nn.Sequential(
+        #     nn.Linear(in_channel, out_channel),
+        #     nn.BatchNorm1d(out_channel),
+        #     nn.LeakyReLU(0.2, inplace=True)
+        # )
+        self.fc = EqualLinear(in_channel, out_channel, activation="fused_lrelu")
+    def forward(self, x):
+        x = self.fc(x)
+        return x
+
+
+# class LinearDown(nn.Module):
+#     def __init__(self, in_channel, out_channel):
+#         super().__init__()
+#         self.fc = LinearModule(in_channel, out_channel)
+#     def forward(self, x):
+#         x = self.fc(x)
+#         return x
+
+
+# class LinearUp(nn.Module):
+#     def __init__(self, in_channel, out_channel):
+#         super().__init__()
+#         self.up = LinearModule(in_channel, out_channel)
+#         # self.down = LinearModule(out_channel*2, out_channel)
+#     def forward(self, x, _x):
+#         x = self.up(x)
+#         # x = self.down(torch.cat((x, _x), dim=1))
+#         return x
+
+
+# decompose w_plus into variance code and invariance code
+class Decomposer(nn.Module):
+    def __init__(self, num_ws, w_dim, vc_dim, ivc_dim):
+        super().__init__()
+        self.vc_dim = vc_dim
+        self.ivc_dim = ivc_dim
+        full_dim = num_ws * w_dim
+        self.fc0 = LinearModule(full_dim, full_dim)
+        self.fc1 = LinearModule(full_dim, full_dim//4)
+        self.fc2 = LinearModule(full_dim//4, full_dim//16)
+        self.fc3 = LinearModule(full_dim//16, vc_dim+ivc_dim)
+
+    def forward(self, w):
+        x = self.fc0(w.view(w.size(0), -1))  # // 1
+        x = self.fc1(x)  # // 4
+        x = self.fc2(x)  # // 16
+        x = self.fc3(x)  # fnl
+
+        vc = x[:, 0: self.vc_dim]
+        ivc = x[:, self.vc_dim: self.vc_dim+self.ivc_dim]
+        return vc, ivc
+
+# compose variance code and invariance code into w_plus
+class Composer(nn.Module):
+    def __init__(self, num_ws, w_dim, vc_dim, ivc_dim):
+        super().__init__()
+        self.num_ws = num_ws
+        self.w_dim = w_dim
+        full_dim = num_ws * w_dim
+        self.fc0 = LinearModule(vc_dim+ivc_dim, full_dim//16)
+        self.fc1 = LinearModule(full_dim//16, full_dim//4)
+        self.fc2 = LinearModule(full_dim//4, full_dim)
+        self.fc3 = LinearModule(full_dim, full_dim)
+
+    def forward(self, vc, ivc):
+        x = self.fc0(torch.cat((vc, ivc), dim=1))  # // 16
+        x = self.fc1(x)  # // 4
+        x = self.fc2(x)  # // 1
+        x = self.fc3(x)  # // 1
+        return x.view(vc.size(0), self.num_ws, self.w_dim)
+
+
+
+
+############# only distil color coding ##################
+# distill variance code from w_plus
+class Distiller(nn.Module):
+    def __init__(self, num_ws, w_dim, vc_dim):
+        super().__init__()
+        self.vc_dim = vc_dim
+        full_dim = num_ws * w_dim
+        self.fc0 = LinearModule(full_dim, full_dim)
+        self.fc1 = LinearModule(full_dim, full_dim//4)
+        self.fc2 = LinearModule(full_dim//4, full_dim//16)
+        self.fc3 = LinearModule(full_dim//16, vc_dim)
+
+    def forward(self, w):
+        x = self.fc0(w.view(w.size(0), -1))  # // 1
+        x = self.fc1(x)
+        x = self.fc2(x)
+        x = self.fc3(x)
+        return x
+
+# mix variance code into w_plus
+class Mixer(nn.Module):
+    def __init__(self, num_ws, w_dim, vc_dim):
+        super().__init__()
+        self.num_ws = num_ws
+        self.w_dim = w_dim
+        full_dim = num_ws * w_dim
+        self.fc0 = LinearModule(vc_dim+full_dim, full_dim)
+        self.fc1 = LinearModule(full_dim, full_dim)
+        self.fc2 = LinearModule(full_dim, full_dim)
+
+    def forward(self, w, vc):
+        x = self.fc0(torch.cat((w.view(w.size(0), -1), vc), dim=1))
+        x = self.fc1(x)
+        x = self.fc2(x)
+        # x = self.fc3(x)
+        return x.view(-1, self.num_ws, self.w_dim)
