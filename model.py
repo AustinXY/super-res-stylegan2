@@ -1154,38 +1154,59 @@ class Composer(nn.Module):
 
 
 ############# only distil color coding ##################
-# distill variance code from w_plus
-class Distiller(nn.Module):
-    def __init__(self, num_ws, w_dim, vc_dim):
-        super().__init__()
-        self.vc_dim = vc_dim
-        full_dim = num_ws * w_dim
-        self.fc0 = LinearModule(full_dim, full_dim)
-        self.fc1 = LinearModule(full_dim, full_dim//4)
-        self.fc2 = LinearModule(full_dim//4, full_dim//16)
-        self.fc3 = LinearModule(full_dim//16, vc_dim)
+# # distill variance code from w_plus
+# class Distiller(nn.Module):
+#     def __init__(self, num_ws, w_dim, vc_dim):
+#         super().__init__()
+#         self.vc_dim = vc_dim
+#         full_dim = num_ws * w_dim
+#         self.fc0 = LinearModule(full_dim, full_dim)
+#         self.fc1 = LinearModule(full_dim, full_dim//4)
+#         self.fc2 = LinearModule(full_dim//4, full_dim//16)
+#         self.fc3 = LinearModule(full_dim//16, vc_dim)
 
-    def forward(self, w):
-        x = self.fc0(w.view(w.size(0), -1))  # // 1
-        x = self.fc1(x)
-        x = self.fc2(x)
-        x = self.fc3(x)
-        return x
+#     def forward(self, w):
+#         x = self.fc0(w.view(w.size(0), -1))  # // 1
+#         x = self.fc1(x)
+#         x = self.fc2(x)
+#         x = self.fc3(x)
+#         return x
 
-# mix variance code into w_plus
+# # mix variance code into w_plus
+# class Mixer(nn.Module):
+#     def __init__(self, num_ws, w_dim, vc_dim):
+#         super().__init__()
+#         self.num_ws = num_ws
+#         self.w_dim = w_dim
+#         full_dim = num_ws * w_dim
+#         self.fc0 = LinearModule(vc_dim+full_dim, full_dim)
+#         self.fc1 = LinearModule(full_dim, full_dim)
+#         self.fc2 = LinearModule(full_dim, full_dim)
+
+#     def forward(self, w, vc):
+#         x = self.fc0(torch.cat((w.view(w.size(0), -1), vc), dim=1))
+#         x = self.fc1(x)
+#         x = self.fc2(x)
+#         # x = self.fc3(x)
+#         return x.view(-1, self.num_ws, self.w_dim)
+
+
+############# implicitly mix code ##################
+# mix 2 w codes into one
 class Mixer(nn.Module):
-    def __init__(self, num_ws, w_dim, vc_dim):
+    def __init__(self, num_ws, w_dim):
         super().__init__()
         self.num_ws = num_ws
         self.w_dim = w_dim
         full_dim = num_ws * w_dim
-        self.fc0 = LinearModule(vc_dim+full_dim, full_dim)
-        self.fc1 = LinearModule(full_dim, full_dim)
+        self.fc0 = LinearModule(full_dim*2, full_dim*2)
+        self.fc1 = LinearModule(full_dim*2, full_dim)
         self.fc2 = LinearModule(full_dim, full_dim)
 
-    def forward(self, w, vc):
-        x = self.fc0(torch.cat((w.view(w.size(0), -1), vc), dim=1))
-        x = self.fc1(x)
-        x = self.fc2(x)
-        # x = self.fc3(x)
-        return x.view(-1, self.num_ws, self.w_dim)
+    def forward(self, w0, w1):
+        batch = w0.size(0)
+        in_w = torch.cat((w0.view(batch, -1), w1.view(batch, -1)), dim=1)
+        w = self.fc0(in_w)
+        w = self.fc1(w)
+        w = self.fc2(w)
+        return w.view(batch, self.num_ws, self.w_dim)

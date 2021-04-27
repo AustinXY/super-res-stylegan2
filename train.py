@@ -39,7 +39,7 @@ from distributed import (
 )
 # from non_leaking import augment, AdaptiveAugment
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+# os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 # os.environ['PYTHONWARNINGS'] = 'ignore:semaphore_tracker:UserWarning'
 
@@ -327,14 +327,8 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
 
         g_loss = adv_loss * args.adv + mse_loss * args.mse
 
-        mpnet.zero_grad()
-        g_loss.backward()
-        mp_optim.step()
-
         ############# down sample image latent reconstruct #############
         if args.ltnt_recon_every != 0 and i % args.ltnt_recon_every == 0:
-            mpnet.requires_grad_(True)
-            style_discriminator.requires_grad_(False)
 
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
@@ -346,9 +340,12 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
 
             loss_dict["lrl"] = latent_recon_loss
 
-            mpnet.zero_grad()
-            (latent_recon_loss * args.lrl).backward()
-            mp_optim.step()
+            g_loss += latent_recon_loss * args.lrl
+
+
+        mpnet.zero_grad()
+        g_loss.backward()
+        mp_optim.step()
 
         ############# ############# #############
         loss_reduced = reduce_loss_dict(loss_dict)
@@ -406,8 +403,13 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
+                    rec_img, _ = style_generator([wp_code], input_is_latent=True)
 
-                    style_img, _ = style_generator([wp_code], input_is_latent=True)
+                    noise = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img, _ = style_generator(noise, return_latents=True)
+                    _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
+                    wp_code = mpnet(_style_img)
+                    rec_img2, _ = style_generator([wp_code], input_is_latent=True)
 
                     utils.save_image(
                         fine_img,
@@ -418,18 +420,35 @@ def train(args, loader, fine_generator, style_generator, style_discriminator, mp
                     )
 
                     utils.save_image(
-                        style_img,
+                        rec_img,
                         f"sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        style_img,
+                        f"sample/{str(i).zfill(6)}_2.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        rec_img2,
+                        f"sample/{str(i).zfill(6)}_3.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "lr image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "hr image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "recon image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "rocon image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
                             }
                         )
 
@@ -512,19 +531,19 @@ if __name__ == "__main__":
         "--trunc", action="store_true", help="use truncation"
     )
     parser.add_argument(
-        "--ltnt_recon_every", type=int, default=0, help="down sample images reconstruct"
+        "--ltnt_recon_every", type=int, default=1, help="down sample images reconstruct"
     )
     parser.add_argument('--mp_arch', type=str, default='encoder',
                         help='model architectures (vanilla | encoder)')
     parser.add_argument(
         "--tie_code", action="store_true", help="use tied codes"
     )
-    parser.add_argument('--ds_name', type=str, default='LSUNCAR',
+    parser.add_argument('--ds_name', type=str, default='STANFORDCAR',
                         help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
     ## weights
     parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
     parser.add_argument("--mse", type=float, default=1e2, help="weight of the mse loss")
-    parser.add_argument("--lrl", type=float, default=1e1, help="weight of the latent recon loss")
+    parser.add_argument("--lrl", type=float, default=1e2, help="weight of the latent recon loss")
 
     args = parser.parse_args()
 
