@@ -68,16 +68,6 @@ def latent_noise(latent, strength):
 
     return latent + noise
 
-def data_sampler(dataset, shuffle, distributed):
-    if distributed:
-        return data.distributed.DistributedSampler(dataset, shuffle=shuffle)
-
-    if shuffle:
-        return data.RandomSampler(dataset)
-
-    else:
-        return data.SequentialSampler(dataset)
-
 
 def child_to_parent(c_code, c_dim, p_dim):
     ratio = c_dim / p_dim

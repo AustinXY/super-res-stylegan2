@@ -1076,14 +1076,22 @@ class Encoder(nn.Module):
 
 
 class LinearModule(nn.Module):
-    def __init__(self, in_channel, out_channel):
+    def __init__(self, in_channel, out_channel, activation=True, normalize=True):
         super().__init__()
-        # self.fc = nn.Sequential(
-        #     nn.Linear(in_channel, out_channel),
-        #     nn.BatchNorm1d(out_channel),
-        #     nn.LeakyReLU(0.2, inplace=True)
-        # )
-        self.fc = EqualLinear(in_channel, out_channel, activation="fused_lrelu")
+        if normalize:
+            self.fc = nn.Sequential(
+                nn.Linear(in_channel, out_channel),
+                nn.BatchNorm1d(out_channel),
+                nn.LeakyReLU(0.2, inplace=True)
+            )
+        elif activation:
+            self.fc = nn.Sequential(
+                nn.Linear(in_channel, out_channel),
+                nn.LeakyReLU(0.2, inplace=True)
+            )
+        else:
+            self.fc = nn.Linear(in_channel, out_channel)
+        # self.fc = EqualLinear(in_channel, out_channel, activation="fused_lrelu")
     def forward(self, x):
         x = self.fc(x)
         return x
@@ -1154,53 +1162,53 @@ class Composer(nn.Module):
 
 
 ############# only distil color coding ##################
-# # distill variance code from w_plus
-# class Distiller(nn.Module):
-#     def __init__(self, num_ws, w_dim, vc_dim):
-#         super().__init__()
-#         self.vc_dim = vc_dim
-#         full_dim = num_ws * w_dim
-#         self.fc0 = LinearModule(full_dim, full_dim)
-#         self.fc1 = LinearModule(full_dim, full_dim//4)
-#         self.fc2 = LinearModule(full_dim//4, full_dim//16)
-#         self.fc3 = LinearModule(full_dim//16, vc_dim)
+# distill variance code from w_plus
+class Distiller(nn.Module):
+    def __init__(self, num_ws, w_dim, vc_dim):
+        super().__init__()
+        self.vc_dim = vc_dim
+        full_dim = num_ws * w_dim
+        self.fc0 = LinearModule(full_dim, full_dim)
+        self.fc1 = LinearModule(full_dim, full_dim//4)
+        self.fc2 = LinearModule(full_dim//4, full_dim//16)
+        self.fc3 = LinearModule(full_dim//16, vc_dim, normalize=False)
 
-#     def forward(self, w):
-#         x = self.fc0(w.view(w.size(0), -1))  # // 1
-#         x = self.fc1(x)
-#         x = self.fc2(x)
-#         x = self.fc3(x)
-#         return x
+    def forward(self, w):
+        x = self.fc0(w.view(w.size(0), -1))
+        x = self.fc1(x)
+        x = self.fc2(x)
+        vc = self.fc3(x)
+        return vc
 
-# # mix variance code into w_plus
-# class Mixer(nn.Module):
-#     def __init__(self, num_ws, w_dim, vc_dim):
-#         super().__init__()
-#         self.num_ws = num_ws
-#         self.w_dim = w_dim
-#         full_dim = num_ws * w_dim
-#         self.fc0 = LinearModule(vc_dim+full_dim, full_dim)
-#         self.fc1 = LinearModule(full_dim, full_dim)
-#         self.fc2 = LinearModule(full_dim, full_dim)
+# mix variance code into w_plus
+class Mixer(nn.Module):
+    def __init__(self, num_ws, w_dim, vc_dim):
+        super().__init__()
+        self.num_ws = num_ws
+        self.w_dim = w_dim
+        full_dim = num_ws * w_dim
+        self.fc0 = LinearModule(vc_dim+full_dim, full_dim)
+        self.fc1 = LinearModule(full_dim, full_dim)
+        self.fc2 = LinearModule(full_dim, full_dim, normalize=False)
 
-#     def forward(self, w, vc):
-#         x = self.fc0(torch.cat((w.view(w.size(0), -1), vc), dim=1))
-#         x = self.fc1(x)
-#         x = self.fc2(x)
-#         # x = self.fc3(x)
-#         return x.view(-1, self.num_ws, self.w_dim)
+    def forward(self, w, vc):
+        x = self.fc0(torch.cat((w.view(w.size(0), -1), vc), dim=1))
+        x = self.fc1(x)
+        x = self.fc2(x)
+        # x = self.fc3(x)
+        return x.view(-1, self.num_ws, self.w_dim)
 
 
 ############# implicitly mix code ##################
 # mix 2 w codes into one
-class Mixer(nn.Module):
+class ImplicitMixer(nn.Module):
     def __init__(self, num_ws, w_dim):
         super().__init__()
         self.num_ws = num_ws
         self.w_dim = w_dim
         full_dim = num_ws * w_dim
-        self.fc0 = LinearModule(full_dim*2, full_dim*2)
-        self.fc1 = LinearModule(full_dim*2, full_dim)
+        self.fc0 = LinearModule(full_dim*2, full_dim)
+        self.fc1 = LinearModule(full_dim, full_dim)
         self.fc2 = LinearModule(full_dim, full_dim)
 
     def forward(self, w0, w1):
@@ -1209,4 +1217,78 @@ class Mixer(nn.Module):
         w = self.fc0(in_w)
         w = self.fc1(w)
         w = self.fc2(w)
+        return w.view(batch, self.num_ws, self.w_dim)
+
+
+class ImplicitMixer1(nn.Module):
+    def __init__(self, num_ws, w_dim):
+        super().__init__()
+        self.num_ws = num_ws
+        self.w_dim = w_dim
+        full_dim = num_ws * w_dim
+        self.full_dim = full_dim
+
+        self.fc0_0 = LinearModule(full_dim, full_dim)
+        self.fc1_0 = LinearModule(full_dim, full_dim)
+        self.fc2_0 = LinearModule(full_dim, full_dim, activation=True, normalize=False)
+
+        self.fc0_1 = LinearModule(full_dim, full_dim)
+        self.fc1_1 = LinearModule(full_dim, full_dim)
+        self.fc2_1 = LinearModule(full_dim, full_dim, activation=True, normalize=False)
+
+        self.fc2 = nn.Sequential(
+            # LinearModule(full_dim, full_dim, activation=True, normalize=False),
+            LinearModule(full_dim, full_dim, activation=False, normalize=False),
+        )
+
+    def forward(self, w0, w1):
+        batch = w0.size(0)
+        w0 = self.fc0_0(w0.view(batch, self.full_dim))
+        w0 = self.fc1_0(w0)
+        w0 = self.fc2_0(w0)
+
+        w1 = self.fc0_1(w1.view(batch, self.full_dim))
+        w1 = self.fc1_1(w1)
+        w1 = self.fc2_1(w1)
+
+        w = w0 + w1
+        w = self.fc2(w)
+        return w.view(batch, self.num_ws, self.w_dim)
+
+
+class ImplicitMixer2(nn.Module):
+    def __init__(self, num_ws, w_dim):
+        super().__init__()
+        self.num_ws = num_ws
+        self.w_dim = w_dim
+        full_dim = num_ws * w_dim
+        self.full_dim = full_dim
+
+        self.layers = nn.ModuleList()
+        for _ in range(num_ws):
+            self.layers.append(
+                nn.Sequential(
+                    LinearModule(w_dim*2, w_dim*2),
+                    LinearModule(w_dim*2, w_dim*2),
+                    LinearModule(w_dim*2, w_dim),
+                )
+            )
+
+        self.final_fc = nn.Sequential(
+            LinearModule(full_dim, full_dim),
+            LinearModule(full_dim, full_dim, activation=False, normalize=False),
+        )
+
+    def forward(self, w0, w1):
+        batch = w0.size(0)
+        wp = torch.cat((w0, w1), dim=2)
+        ws = []
+        for i in range(self.num_ws):
+            layer = self.layers[i]
+            w = wp[:, i]
+            w = layer(w)
+            ws.append(w)
+
+        w = torch.cat(ws, dim=1)
+        w = self.final_fc(w)
         return w.view(batch, self.num_ws, self.w_dim)

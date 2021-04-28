@@ -68,16 +68,6 @@ def latent_noise(latent, strength):
 
     return latent + noise
 
-def data_sampler(dataset, shuffle, distributed):
-    if distributed:
-        return data.distributed.DistributedSampler(dataset, shuffle=shuffle)
-
-    if shuffle:
-        return data.RandomSampler(dataset)
-
-    else:
-        return data.SequentialSampler(dataset)
-
 
 def child_to_parent(c_code, c_dim, p_dim):
     ratio = c_dim / p_dim
@@ -256,8 +246,8 @@ if __name__ == "__main__":
     # z = params['z'].to(device)
     # b = params['b'].to(device)
     # p = params['p'].to(device)
-    c0 = params['c0'].to(device)
-    c1 = params['c1'].to(device)
+    # c0 = params['c0'].to(device)
+    # c1 = params['c1'].to(device)
     latent = params['rand_latent'].to(device)
 
     with torch.no_grad():

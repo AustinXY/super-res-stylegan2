@@ -19,7 +19,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, MappingNetwork, G_NET, Encoder, ImplicitMixer2
+from model import Generator, MappingNetwork, G_NET, Encoder, Mixer, Distiller
 
 from finegan_config import finegan_config
 
@@ -153,7 +153,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 
-def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device):
+def train(args, fine_generator, style_generator, mpnet, distiller, mixer, dlr_optim, mxr_optim, device):
 
     pbar = range(args.iter)
 
@@ -167,11 +167,13 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
         mp_module = mpnet.module
         fine_g_module = fine_generator.module
         style_g_module = style_generator.module
+        dlr_module = distiller.module
         mxr_module = mixer.module
     else:
         mp_module = mpnet
         fine_g_module = fine_generator
         style_g_module = style_generator
+        dlr_module = distiller
         mxr_module = mixer
 
     fine_generator.eval()
@@ -188,7 +190,40 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
             print("Done!")
             break
 
+        distiller.train()
         mixer.train()
+
+        # # ############# train distiller #############
+        # distiller.requires_grad_(True)
+        # mixer.requires_grad_(False)
+
+        # z0, b0, p0, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        # if not args.tie_code:
+        #     z0, b0, p0, c = rand_sample_codes(prev_z=z0, prev_b=b0, prev_p=p0, prev_c=c, rand_code=['b', 'p'])
+
+        # z1, b1, p1, _ = rand_sample_codes(prev_z=z0, prev_b=b0, prev_p=p0, prev_c=None, rand_code=['z', 'b', 'p'])
+
+        # ref_img = fine_generator(z0, b0, p0, c)
+        # clr_inv_img = fine_generator(z1, b1, p1, c)  # color invariant image
+
+        # ref_w = mpnet(ref_img)
+        # clr_inv_w = mpnet(clr_inv_img)
+
+        # # variance, invariant code reconstruction
+        # ref_vc = distiller(ref_w)
+        # clr_inv_vc = distiller(clr_inv_w)
+
+        # dlr_loss = F.mse_loss(clr_inv_vc, ref_vc) * args.dlr_mse
+
+        # loss_dict["dlr"] = dlr_loss
+
+        # distiller.zero_grad()
+        # dlr_loss.backward()
+        # dlr_optim.step()
+
+
+        ############ train mixer #############
+        distiller.requires_grad_(True)
         mixer.requires_grad_(True)
 
         z0, b0, p0, c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
@@ -205,8 +240,20 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
         color_w = mpnet(color_img)
         target_w = mpnet(target_img)
 
-        mix_w = mixer(shape_w, color_w)
+        shape_vc = distiller(shape_w)
+        color_vc = distiller(color_w)
+        target_vc = distiller(target_w)
+
+        mix_w = mixer(shape_w, color_vc)
+
+        # w reconstruction loss
         w_loss = F.mse_loss(mix_w, target_w) * args.w_mse
+
+        # vc distillation loss
+        # vc_loss = (F.mse_loss(color_vc, target_vc) +\
+        #     F.relu(F.mse_loss(color_vc, target_vc) - F.mse_loss(shape_vc, target_vc))) * args.vc_mse
+        vc_loss = F.mse_loss(color_vc, target_vc) * args.vc_mse
+
 
         if args.constrain_img:
             target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
@@ -215,29 +262,35 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
         else:
             img_loss = torch.zeros(1, device=device)
 
-        mxr_loss = w_loss + img_loss
+        mxr_loss = w_loss + img_loss + vc_loss
+
+        loss_dict["vc"] = vc_loss
         loss_dict["w"] = w_loss
         loss_dict["img"] = img_loss
 
+        distiller.zero_grad()
         mixer.zero_grad()
         mxr_loss.backward()
+        dlr_optim.step()
         mxr_optim.step()
 
         ############# ############# #############
         loss_reduced = reduce_loss_dict(loss_dict)
+        vc_loss_val = loss_reduced["vc"].mean().item()
         w_loss_val = loss_reduced["w"].mean().item()
         img_loss_val = loss_reduced["img"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}"
+                    f"vc: {vc_loss_val:.4f}; w: {w_loss_val:.4f}; img: {img_loss_val:.4f}"
                 )
             )
 
             if wandb and args.wandb:
                 wandb.log(
                     {
+                        "VC MSE": vc_loss_val,
                         "W MSE": w_loss_val,
                         "Img MSE": img_loss_val,
                     }
@@ -245,6 +298,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
             if i % 1000 == 0:
                 with torch.no_grad():
+                    distiller.eval()
                     mixer.eval()
 
                     z0, b0, p0, c0 = sample_codes(args.n_sample, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
@@ -260,7 +314,9 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     shape_w = mpnet(shape_img)
                     color_w = mpnet(color_img)
                     target_w = mpnet(target_img)
-                    mix_w = mixer(shape_w, color_w)
+
+                    color_vc = distiller(color_w)
+                    mix_w = mixer(shape_w, color_vc)
 
                     _shape_img, _ = style_generator([shape_w], input_is_latent=True)
                     _color_img, _ = style_generator([color_w], input_is_latent=True)
@@ -268,17 +324,18 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     _mix_img, _ = style_generator([mix_w], input_is_latent=True)
 
                     noise1 = mixing_noise(args.n_sample, args.latent, args.mixing, device)
-                    sample_img1, _ = style_generator(noise1, return_latents=True)
+                    sample_img1, _ = style_generator(noise1)
                     _sample_img1 = F.interpolate(sample_img1, size=(128, 128), mode='area')
 
                     noise2 = mixing_noise(args.n_sample, args.latent, args.mixing, device)
-                    sample_img2, _ = style_generator(noise2, return_latents=True)
+                    sample_img2, _ = style_generator(noise2)
                     _sample_img2 = F.interpolate(sample_img2, size=(128, 128), mode='area')
 
                     w1 = mpnet(_sample_img1)
                     w2 = mpnet(_sample_img2)
+                    vc2 = distiller(w2)
 
-                    mix_w = mixer(w1, w2)
+                    mix_w = mixer(w1, vc2)
                     mix_sample, _ = style_generator([mix_w], input_is_latent=True)
 
                     utils.save_image(
@@ -345,18 +402,20 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                             }
                         )
 
-            if i % 40000 == 0 and i != args.start_iter:
+            if i % 50000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "style_g": style_g_module.state_dict(),
                         "fine": fine_g_module.state_dict(),
                         "mp": mp_module.state_dict(),
+                        "dlr": dlr_module.state_dict(),
                         "mxr": mxr_module.state_dict(),
+                        "dlr_optim": dlr_optim.state_dict(),
                         "mxr_optim": mxr_optim.state_dict(),
                         "args": args,
                         "cur_iter": i,
                     },
-                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}.pt",
+                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}_2.pt",
                 )
 
 
@@ -402,8 +461,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--constrain_img", action="store_true", help="use img mse loss as well"
     )
-    parser.add_argument("--w_mse", type=float, default=1, help="mse weight for w")
+
+    # parser.add_argument("--vc_thrsh", type=float, default=0.5, help="mse weight for vc")
+
+    parser.add_argument("--vc_mse", type=float, default=1, help="mse weight for vc")
+    parser.add_argument("--w_mse", type=float, default=1e1, help="mse weight for w")
     parser.add_argument("--img_mse", type=float, default=1e-1, help="mse weight for img")
+
+    parser.add_argument("--vc_dim", type=int, default=100, help="variance code dim")
 
     args = parser.parse_args()
 
@@ -421,8 +486,8 @@ if __name__ == "__main__":
     args.start_iter = 0
 
     if args.mp_ckpt is not None:
-        mp_ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
-        mp_args = mp_ckpt['args']
+        ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
+        mp_args = ckpt['args']
     elif args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
         mp_args = ckpt['args']
@@ -443,7 +508,6 @@ if __name__ == "__main__":
     args.b_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
-
 
     style_generator = Generator(
         size=args.size,
@@ -467,10 +531,23 @@ if __name__ == "__main__":
             w_dim=args.latent
         ).to(device)
 
-    mixer = ImplicitMixer2(
+    distiller = Distiller(
         num_ws=style_generator.n_latent,
         w_dim=args.latent,
+        vc_dim=args.vc_dim
     ).to(device)
+
+    mixer = Mixer(
+        num_ws=style_generator.n_latent,
+        w_dim=args.latent,
+        vc_dim=args.vc_dim
+    ).to(device)
+
+    dlr_optim = optim.Adam(
+        distiller.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
 
     mxr_optim = optim.Adam(
         mixer.parameters(),
@@ -482,7 +559,9 @@ if __name__ == "__main__":
         print("loading checkpoint:", args.ckpt)
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
         mixer.load_state_dict(ckpt["mxr"])
+        distiller.load_state_dict(ckpt["dlr"])
         mxr_optim.load_state_dict(ckpt["mxr_optim"])
+        dlr_optim.load_state_dict(ckpt["dlr_optim"])
 
         if args.mp_ckpt is None:
             mpnet.load_state_dict(ckpt["mp"])
@@ -520,6 +599,6 @@ if __name__ == "__main__":
         # )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="mixer net")
+        wandb.init(project="distiller mixer")
 
-    train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device)
+    train(args, fine_generator, style_generator, mpnet, distiller, mixer, dlr_optim, mxr_optim, device)

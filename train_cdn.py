@@ -416,8 +416,8 @@ if __name__ == "__main__":
         "--tie_code", action="store_true", help="use tied codes"
     )
 
-    parser.add_argument("--vc_dim", type=int, default=4096, help="variance code dim")
-    parser.add_argument("--ivc_dim", type=int, default=512, help="invariance code dim")
+    parser.add_argument("--vc_dim", type=int, default=512, help="variance code dim")
+    parser.add_argument("--ivc_dim", type=int, default=4096, help="invariance code dim")
 
     ## weights
     # parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
