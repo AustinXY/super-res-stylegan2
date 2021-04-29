@@ -19,7 +19,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, MappingNetwork, G_NET, Encoder, ImplicitMixer2
+from model import Generator, MappingNetwork, G_NET, Encoder, ImgMixer
 
 from finegan_config import finegan_config
 
@@ -205,19 +205,37 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
         color_w = mpnet(color_img)
         target_w = mpnet(target_img)
 
-        mix_w = mixer(shape_w, color_w)
+        shape_img, _ = style_generator([shape_w], input_is_latent=True, randomize_noise=False)
+        color_img, _ = style_generator([color_w], input_is_latent=True, randomize_noise=False)
+        target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
+
+        if args.mxr_size < args.size:
+            shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
+
+        mix_w = mixer(shape_img, color_img)
         w_loss = F.mse_loss(mix_w, target_w) * args.w_mse
 
-        if args.constrain_img:
-            target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
-            mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
-            img_loss = F.mse_loss(mix_img, target_img) * args.img_mse
-        else:
-            img_loss = torch.zeros(1, device=device)
+        mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
+        img_loss = F.mse_loss(mix_img, target_img) * args.img_mse
 
-        mxr_loss = w_loss + img_loss
-        loss_dict["w"] = w_loss
-        loss_dict["img"] = img_loss
+        # reconstruct sampled images
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        sample_img, sample_w = style_generator(noise, return_latents=True, randomize_noise=False)
+
+        if args.mxr_size < args.size:
+            sample_img = F.interpolate(sample_img, size=(args.mxr_size, args.mxr_size), mode='area')
+
+        rec_sample_w = mixer(sample_img, sample_img)
+        rec_loss = F.mse_loss(rec_sample_w, sample_w) * args.recw
+
+        # mixer loss
+        mxr_loss = w_loss + img_loss + rec_loss
+
+        loss_dict["w"] = w_loss / args.w_mse
+        loss_dict["img"] = img_loss / args.img_mse
+        loss_dict["rec"] = rec_loss / args.recw
+
 
         mixer.zero_grad()
         mxr_loss.backward()
@@ -227,11 +245,12 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
         loss_reduced = reduce_loss_dict(loss_dict)
         w_loss_val = loss_reduced["w"].mean().item()
         img_loss_val = loss_reduced["img"].mean().item()
+        rec_loss_val = loss_reduced["rec"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}"
+                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}; rec: {rec_loss_val:.4f}"
                 )
             )
 
@@ -240,6 +259,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     {
                         "W MSE": w_loss_val,
                         "Img MSE": img_loss_val,
+                        "Recon W": rec_loss_val
                     }
                 )
 
@@ -260,29 +280,35 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     shape_w = mpnet(shape_img)
                     color_w = mpnet(color_img)
                     target_w = mpnet(target_img)
-                    mix_w = mixer(shape_w, color_w)
 
-                    _shape_img, _ = style_generator([shape_w], input_is_latent=True)
-                    _color_img, _ = style_generator([color_w], input_is_latent=True)
-                    _target_img, _ = style_generator([target_w], input_is_latent=True)
-                    _mix_img, _ = style_generator([mix_w], input_is_latent=True)
+                    shape_img, _ = style_generator([shape_w], input_is_latent=True)
+                    color_img, _ = style_generator([color_w], input_is_latent=True)
+                    target_img, _ = style_generator([target_w], input_is_latent=True)
+
+                    if args.mxr_size < args.size:
+                        _shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
+                        _color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
+
+                    mix_w = mixer(_shape_img, _color_img)
+
+                    mix_img, _ = style_generator([mix_w], input_is_latent=True)
 
                     noise1 = mixing_noise(args.n_sample, args.latent, args.mixing, device)
-                    sample_img1, _ = style_generator(noise1, return_latents=True)
-                    _sample_img1 = F.interpolate(sample_img1, size=(128, 128), mode='area')
+                    shape_smaple, _ = style_generator(noise1)
 
                     noise2 = mixing_noise(args.n_sample, args.latent, args.mixing, device)
-                    sample_img2, _ = style_generator(noise2, return_latents=True)
-                    _sample_img2 = F.interpolate(sample_img2, size=(128, 128), mode='area')
+                    color_sample, _ = style_generator(noise2)
 
-                    w1 = mpnet(_sample_img1)
-                    w2 = mpnet(_sample_img2)
+                    if args.mxr_size < args.size:
+                        _shape_smaple = F.interpolate(shape_smaple, size=(args.mxr_size, args.mxr_size), mode='area')
+                        _color_sample = F.interpolate(color_sample, size=(args.mxr_size, args.mxr_size), mode='area')
 
-                    mix_w = mixer(w1, w2)
+                    mix_w = mixer(_shape_smaple, _color_sample)
+
                     mix_sample, _ = style_generator([mix_w], input_is_latent=True)
 
                     utils.save_image(
-                        _shape_img,
+                        shape_img,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_0.png",
                         nrow=8,
                         normalize=True,
@@ -290,7 +316,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        _color_img,
+                        color_img,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
@@ -298,7 +324,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        _target_img,
+                        target_img,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_2.png",
                         nrow=8,
                         normalize=True,
@@ -306,7 +332,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        _mix_img,
+                        mix_img,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_3.png",
                         nrow=8,
                         normalize=True,
@@ -314,7 +340,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        sample_img1,
+                        shape_smaple,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_4.png",
                         nrow=8,
                         normalize=True,
@@ -322,7 +348,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        sample_img2,
+                        color_sample,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_5.png",
                         nrow=8,
                         normalize=True,
@@ -340,12 +366,14 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     if wandb and args.wandb:
                         wandb.log(
                             {
+                                "fine orig": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                                 "fine mix": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "style orig": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
                                 "style mix": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_6.png").convert("RGB"))]
                             }
                         )
 
-            if i % 40000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "style_g": style_g_module.state_dict(),
@@ -356,7 +384,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                         "args": args,
                         "cur_iter": i,
                     },
-                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}.pt",
+                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}_4.pt",
                 )
 
 
@@ -377,6 +405,9 @@ if __name__ == "__main__":
         help="number of the samples generated during training",
     )
     parser.add_argument(
+        "--mxr_size", type=int, default=512, help="image sizes for the mixer"
+    )
+    parser.add_argument(
         "--ckpt",
         type=str,
         default=None,
@@ -388,7 +419,7 @@ if __name__ == "__main__":
         default=None,
         help="path to mapping ckpt",
     )
-    parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
+    parser.add_argument("--lr", type=float, default=2e-3, help="learning rate")
     parser.add_argument(
         "--wandb", action="store_true", help="use weights and biases logging"
     )
@@ -399,11 +430,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tie_code", action="store_true", help="use tied codes"
     )
-    parser.add_argument(
-        "--constrain_img", action="store_true", help="use img mse loss as well"
-    )
-    parser.add_argument("--w_mse", type=float, default=1, help="mse weight for w")
-    parser.add_argument("--img_mse", type=float, default=1e-1, help="mse weight for img")
+
+    parser.add_argument("--w_mse", type=float, default=1e1, help="mse weight for w")
+    parser.add_argument("--img_mse", type=float, default=1, help="mse weight for img")
+    parser.add_argument("--recw", type=float, default=1e1, help="mse weight for reconstruct sampled w")
 
     args = parser.parse_args()
 
@@ -421,8 +451,8 @@ if __name__ == "__main__":
     args.start_iter = 0
 
     if args.mp_ckpt is not None:
-        ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
-        mp_args = ckpt['args']
+        mp_ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
+        mp_args = mp_ckpt['args']
     elif args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
         mp_args = ckpt['args']
@@ -467,9 +497,10 @@ if __name__ == "__main__":
             w_dim=args.latent
         ).to(device)
 
-    mixer = ImplicitMixer2(
+    mixer = ImgMixer(
+        size=args.mxr_size,
         num_ws=style_generator.n_latent,
-        w_dim=args.latent,
+        w_dim=args.latent
     ).to(device)
 
     mxr_optim = optim.Adam(
@@ -481,6 +512,8 @@ if __name__ == "__main__":
     if args.ckpt is not None:
         print("loading checkpoint:", args.ckpt)
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
+        args.start_iter = ckpt['cur_iter']
+
         mixer.load_state_dict(ckpt["mxr"])
         mxr_optim.load_state_dict(ckpt["mxr_optim"])
 
@@ -520,6 +553,6 @@ if __name__ == "__main__":
         # )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="mixer net")
+        wandb.init(project="image mixer net")
 
     train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device)

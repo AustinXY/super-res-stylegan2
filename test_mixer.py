@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 
 import numpy as np
 import torch
@@ -13,14 +14,14 @@ import math
 import lpips
 from finegan_config import finegan_config
 
-# import seaborn as sns
+import seaborn as sns
 # import matplotlib
 import sys
 # matplotlib.use('Agg')
 
 os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
-from model import Generator, Discriminator, MappingNetwork, Encoder, G_NET
+from model import Generator, Discriminator, MappingNetwork, Encoder, G_NET, ImplicitMixer2
 # from finegan_config import finegan_config
 
 
@@ -46,6 +47,18 @@ def noise_regularize(noises):
 
     return loss
 
+def make_noise(batch, latent_dim, n_noise, device):
+    if n_noise == 1:
+        return torch.randn(batch, latent_dim, device=device)
+    noises = torch.randn(n_noise, batch, latent_dim, device=device).unbind(0)
+    return noises
+
+
+def mixing_noise(batch, latent_dim, prob, device):
+    if prob > 0 and random.random() < prob:
+        return make_noise(batch, latent_dim, 2, device)
+    else:
+        return [make_noise(batch, latent_dim, 1, device)]
 
 def noise_normalize_(noises):
     for noise in noises:
@@ -178,9 +191,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ckpt", type=str, required=True, help="path to the model checkpoint")
     parser.add_argument(
-        "--params", type=str, default='map2style/params.pt', help="path to the model checkpoint")
+        "--params", type=str, default='mixer_testdir/params.pt', help="path to the model checkpoint")
     parser.add_argument(
-        "--batch", type=int, default=16, help="batch sizes for each gpus")
+        "--batch", type=int, default=1, help="batch sizes for each gpus")
     parser.add_argument("--thrld", type=float, default=0.1)
 
     # parser.add_argument('--load_param', type=str, default='')
@@ -205,10 +218,6 @@ if __name__ == "__main__":
         channel_multiplier=train_args.channel_multiplier
     ).to(device)
 
-    style_discriminator = Discriminator(
-        size=train_args.size
-    ).to(device)
-
     if train_args.mp_arch == 'vanilla':
         mpnet = MappingNetwork(
             num_ws=style_generator.n_latent,
@@ -222,105 +231,120 @@ if __name__ == "__main__":
             w_dim=train_args.latent
         ).to(device)
 
+    mixer = ImplicitMixer2(
+        num_ws=style_generator.n_latent,
+        w_dim=train_args.latent,
+    ).to(device)
+
     fine_generator = G_NET(ds_name=train_args.ds_name).to(device)
 
     style_generator.load_state_dict(ckpt["style_g"])
-    style_discriminator.load_state_dict(ckpt["style_d"])
-    mpnet.load_state_dict(ckpt["mp"])
     fine_generator.load_state_dict(ckpt["fine"])
+    mpnet.load_state_dict(ckpt["mp"])
+    mixer.load_state_dict(ckpt["mxr"])
 
     style_generator.eval()
-    style_discriminator.eval()
     mpnet.eval()
     fine_generator.eval()
+    mixer.eval()
 
-    z = None
-    b = None
-    p = None
+    z0 = None
+    b0 = None
+    p0 = None
     c0 = None
+    z1 = None
+    b1 = None
+    p1 = None
     c1 = None
-    latent = None
+    w0 = None
+    w1 = None
 
-    params = torch.load(args.params, map_location=lambda storage, loc: storage)
-    # z = params['z'].to(device)
-    # b = params['b'].to(device)
-    # p = params['p'].to(device)
-    c0 = params['c0'].to(device)
-    # c1 = params['c1'].to(device)
-    latent = params['rand_latent'].to(device)
+    try:
+        params = torch.load(args.params, map_location=lambda storage, loc: storage)
+        # z0 = params['z0'].to(device)
+        # b0 = params['b0'].to(device)
+        # p0 = params['p0'].to(device)
+        c0 = params['c0'].to(device)
+        z1 = params['z1'].to(device)
+        b1 = params['b1'].to(device)
+        p1 = params['p1'].to(device)
+        c1 = params['c1'].to(device)
+        # w0 = params['w0'].to(device)
+        w1 = params['w1'].to(device)
+    except:
+        pass
 
     with torch.no_grad():
-        _z, _b, _p, _c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-        if z is None:
-            z = _z
-        if b is None:
-            b = _b
-        if p is None:
-            p = _p
+        if w0 is None:
+            noise1 = mixing_noise(args.batch, train_args.latent, train_args.mixing, device)
+            sample_img1, _ = style_generator(noise1, return_latents=True)
+            _sample_img1 = F.interpolate(sample_img1, size=(128, 128), mode='area')
+            w0 = mpnet(_sample_img1)
+
+        if w1 is None:
+            noise2 = mixing_noise(args.batch, train_args.latent, train_args.mixing, device)
+            sample_img2, _ = style_generator(noise2, return_latents=True)
+            _sample_img2 = F.interpolate(sample_img2, size=(128, 128), mode='area')
+            w1 = mpnet(_sample_img2)
+
+        mix_w = mixer(w0, w1)
+
+        sample_img1, _ = style_generator([w0], input_is_latent=True)
+        sample_img2, _ = style_generator([w1], input_is_latent=True)
+        mix_sample, _ = style_generator([mix_w], input_is_latent=True)
+        arti_sample, _ = style_generator([w1 - mix_w + w0], input_is_latent=True)
+
+        samples = torch.cat((sample_img1, sample_img2, mix_sample, arti_sample), dim=0)
+
+        _z0, _b0, _p0, _c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        _z0, _b0, _p0, _c0 = rand_sample_codes(prev_z=_z0, prev_b=_b0, prev_p=_p0, prev_c=_c0, rand_code=['b', 'p'])
+        _z1, _b1, _p1, _c1 = rand_sample_codes(prev_z=_z0, prev_b=_b0, prev_p=_p0, prev_c=_c0, rand_code=['z', 'b', 'p', 'c'])
+
+        if z0 is None:
+            z0 = _z0
+        if b0 is None:
+            b0 = _b0
+        if p0 is None:
+            p0 = _p0
         if c0 is None:
             c0 = _c0
-
-        _, _, _, _c1 = rand_sample_codes(z, b, p, c0, rand_code=['c'])
+        if z1 is None:
+            z1 = _z1
+        if b1 is None:
+            b1 = _b1
+        if p1 is None:
+            p1 = _p1
         if c1 is None:
             c1 = _c1
 
-        img0 = fine_generator(z, b, p, c0)
-        wp0 = mpnet(img0)
-        s_img0, _ = style_generator([wp0],
-            input_is_latent=True,
-            randomize_noise=False)
-        imgs = img0
-        s_imgs = s_img0
+        shape_img = fine_generator(z0, b0, p0, c0)
+        color_img = fine_generator(z1, b1, p1, c1)
+        target_img = fine_generator(z0, b0, p0, c1)
 
-        img1 = fine_generator(z, b, p, c1)
-        wp1 = mpnet(img1)
-        s_img1, _ = style_generator([wp1],
-            input_is_latent=True,
-            randomize_noise=False)
-        imgs = torch.cat((imgs, img1), 0)
-        s_imgs = torch.cat((s_imgs, s_img1), 0)
+        shape_w = mpnet(shape_img)
+        color_w = mpnet(color_img)
+        target_w = mpnet(target_img)
+        mix_w = mixer(shape_w, color_w)
 
-        if latent is None:
-            style_z = torch.randn(args.batch, 512, device=device)
-            latent = style_generator.style(style_z)
+        shape_img, _ = style_generator([shape_w], input_is_latent=True)
+        color_img, _ = style_generator([color_w], input_is_latent=True)
+        # target_img, _ = style_generator([target_w], input_is_latent=True)
+        mix_img, _ = style_generator([mix_w], input_is_latent=True)
+        arti_img, _ = style_generator([color_w - mix_w + shape_w], input_is_latent=True)
 
-        rand_img, _ = style_generator([latent],
-            input_is_latent=True,
-            randomize_noise=False)
+        imgs = torch.cat((shape_img, color_img, mix_img, arti_img), dim=0)
 
-        arti_wp = latent - wp0 + wp1
-
-        arti_img, _ = style_generator([arti_wp],
-            input_is_latent=True,
-            randomize_noise=False)
+    utils.save_image(
+        samples,
+        f"mixer_testdir/style.png",
+        nrow=8,
+        normalize=True,
+        range=(-1, 1),
+    )
 
     utils.save_image(
         imgs,
-        f"map2style/fine1.png",
-        nrow=8,
-        normalize=True,
-        range=(-1, 1),
-    )
-
-    utils.save_image(
-        rand_img,
-        f"map2style/rand1.png",
-        nrow=8,
-        normalize=True,
-        range=(-1, 1),
-    )
-
-    utils.save_image(
-        arti_img,
-        f"map2style/arti1.png",
-        nrow=8,
-        normalize=True,
-        range=(-1, 1),
-    )
-
-    utils.save_image(
-        s_imgs,
-        f"map2style/style1.png",
+        f"mixer_testdir/fine.png",
         nrow=8,
         normalize=True,
         range=(-1, 1),
@@ -328,12 +352,16 @@ if __name__ == "__main__":
 
     torch.save(
         {
-            "rand_latent": latent,
-            "z": z,
-            "b": b,
-            "p": p,
+            "z0": z0,
+            "b0": b0,
+            "p0": p0,
             "c0": c0,
+            "z1": z1,
+            "b1": b1,
+            "p1": p1,
             "c1": c1,
+            "w0": w0,
+            "w1": w1
         },
-        f"map2style/params.pt",
+        f"mixer_testdir/params.pt",
     )

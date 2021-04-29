@@ -178,19 +178,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ckpt", type=str, required=True, help="path to the model checkpoint")
     parser.add_argument(
-        "paths", metavar="PATHS", nargs="+", help="path to image files or directory of files to be projected")
+        "--paths", default=None, metavar="PATHS", nargs="+", help="path to image files or directory of files to be projected")
     parser.add_argument(
         "--batch", type=int, default=16, help="batch sizes for each gpus")
     parser.add_argument("--thrld", type=float, default=0.1)
-    parser.add_argument('--ds_name', type=str, default='STANFORDCAR',
-                        help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
 
     args = parser.parse_args()
-
-    args.z_dim = finegan_config[args.ds_name]['Z_DIM']
-    args.b_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
-    args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
-    args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
     resize = 128
 
@@ -201,27 +194,33 @@ if __name__ == "__main__":
         ]
     )
 
-    if os.path.isdir(args.paths[0]):
-        img_files = [os.path.join(args.paths[0], f) for f in os.listdir(
-            args.paths[0]) if '.png' in f]
-    else:
-        img_files = args.paths
+    if args.paths is not None:
+        if os.path.isdir(args.paths[0]):
+            img_files = [os.path.join(args.paths[0], f) for f in os.listdir(
+                args.paths[0]) if '.png' in f]
+        else:
+            img_files = args.paths
 
-    imgs = []
-    for imgfile in sorted(img_files):
-        img = transform(Image.open(imgfile).convert("RGB"))
-        if img.size()[1:3] == (128, 128):
-            imgs.append(img)
-            if len(imgs) >= args.batch:
-                break
+        imgs = []
+        for imgfile in sorted(img_files):
+            img = transform(Image.open(imgfile).convert("RGB"))
+            if img.size()[1:3] == (128, 128):
+                imgs.append(img)
+                if len(imgs) >= args.batch:
+                    break
 
-    imgs = torch.stack(imgs, 0).to(device)
-    batch = imgs.size(0)
+        imgs = torch.stack(imgs, 0).to(device)
+        batch = imgs.size(0)
 
     assert args.ckpt is not None
     print("load model:", args.ckpt)
     ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
     train_args = ckpt['args']
+
+    args.z_dim = finegan_config[train_args.ds_name]['Z_DIM']
+    args.b_dim = finegan_config[train_args.ds_name]['FINE_GRAINED_CATEGORIES']
+    args.p_dim = finegan_config[train_args.ds_name]['SUPER_CATEGORIES']
+    args.c_dim = finegan_config[train_args.ds_name]['FINE_GRAINED_CATEGORIES']
 
     style_generator = Generator(
         size=train_args.size,
@@ -247,7 +246,7 @@ if __name__ == "__main__":
             w_dim=train_args.latent
         ).to(device)
 
-    fine_generator = G_NET(ds_name=args.ds_name).to(device)
+    fine_generator = G_NET(ds_name=train_args.ds_name).to(device)
 
     style_generator.load_state_dict(ckpt["style_g"])
     style_discriminator.load_state_dict(ckpt["style_d"])
@@ -259,75 +258,78 @@ if __name__ == "__main__":
     mpnet.eval()
     fine_generator.eval()
 
-    # with torch.no_grad():
-    #     z0, b0, p0, c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-    #     _, _, _, c1 = rand_sample_codes(z0, b0, p0, c0, rand_code=['c'])
-    #     z1, _, _, _ = rand_sample_codes(z0, b0, p0, c1, rand_code=['z'])
 
-    #     img0 = fine_generator(z0, b0, p0, c0)
-    #     wp0 = mpnet(img0)
-    #     s_img0, _ = style_generator([wp0],
-    #         input_is_latent=True,
-    #         randomize_noise=False)
-    #     imgs = img0
-    #     s_imgs = s_img0
 
-    #     # z, b0, p1, c1 = rand_sample_codes(z, b0, p0, c0, rand_code=['p', 'c', 'z'])
-    #     img1 = fine_generator(z1, b0, p0, c0)
-    #     wp1 = mpnet(img1)
-    #     s_img1, _ = style_generator([wp1],
-    #         input_is_latent=True,
-    #         randomize_noise=False)
-    #     imgs = torch.cat((imgs, img1), 0)
-    #     s_imgs = torch.cat((s_imgs, s_img1), 0)
+    if args.paths is None:
+        with torch.no_grad():
+            z0, b0, p0, c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+            z0, b0, p0, c0 = rand_sample_codes(prev_z=z0, prev_b=b0, prev_p=p0, prev_c=c0, rand_code=['b', 'p'])
+            z1, b1, p1, c1 = rand_sample_codes(prev_z=z0, prev_b=b0, prev_p=p0, prev_c=c0, rand_code=['z', 'b', 'p', 'c'])
 
-    #     # z, b1, p1, c1 = rand_sample_codes(z, b0, p1, c1, rand_code=['b'])
-    #     img2 = fine_generator(z1, b0, p0, c1)
-    #     wp2 = mpnet(img2)
-    #     s_img2, _ = style_generator([wp2],
-    #         input_is_latent=True,
-    #         randomize_noise=False)
-    #     imgs = torch.cat((imgs, img2), 0)
-    #     s_imgs = torch.cat((s_imgs, s_img2), 0)
+            img0 = fine_generator(z0, b0, p0, c0)
+            wp0 = mpnet(img0)
+            s_img0, _ = style_generator([wp0],
+                input_is_latent=True,
+                randomize_noise=False)
+            imgs = img0
+            s_imgs = s_img0
 
-    #     img3 = fine_generator(z0, b0, p0, c1)
-    #     wp3 = mpnet(img3)
-    #     s_img3, _ = style_generator([wp3],
-    #         input_is_latent=True,
-    #         randomize_noise=False)
-    #     imgs = torch.cat((imgs, img3), 0)
-    #     s_imgs = torch.cat((s_imgs, s_img3), 0)
+            # z, b0, p1, c1 = rand_sample_codes(z, b0, p0, c0, rand_code=['p', 'c', 'z'])
+            img1 = fine_generator(z1, b1, p1, c0)
+            wp1 = mpnet(img1)
+            s_img1, _ = style_generator([wp1],
+                input_is_latent=True,
+                randomize_noise=False)
+            imgs = torch.cat((imgs, img1), 0)
+            s_imgs = torch.cat((s_imgs, s_img1), 0)
 
-    #     arti_wp = wp0 - wp1 + wp2
-    #     arti_img, _ = style_generator([arti_wp],
-    #         input_is_latent=True,
-    #         randomize_noise=False)
+            # z, b1, p1, c1 = rand_sample_codes(z, b0, p1, c1, rand_code=['b'])
+            img2 = fine_generator(z1, b1, p1, c1)
+            wp2 = mpnet(img2)
+            s_img2, _ = style_generator([wp2],
+                input_is_latent=True,
+                randomize_noise=False)
+            imgs = torch.cat((imgs, img2), 0)
+            s_imgs = torch.cat((s_imgs, s_img2), 0)
 
-    # utils.save_image(
-    #     imgs,
-    #     f"map2style/fine.png",
-    #     nrow=8,
-    #     normalize=True,
-    #     range=(-1, 1),
-    # )
+            img3 = fine_generator(z0, b0, p0, c1)
+            wp3 = mpnet(img3)
+            s_img3, _ = style_generator([wp3],
+                input_is_latent=True,
+                randomize_noise=False)
+            imgs = torch.cat((imgs, img3), 0)
+            s_imgs = torch.cat((s_imgs, s_img3), 0)
 
-    # utils.save_image(
-    #     s_imgs,
-    #     f"map2style/style.png",
-    #     nrow=8,
-    #     normalize=True,
-    #     range=(-1, 1),
-    # )
+            arti_wp = wp0 - wp1 + wp2
+            arti_img, _ = style_generator([arti_wp],
+                input_is_latent=True,
+                randomize_noise=False)
 
-    # utils.save_image(
-    #     arti_img,
-    #     f"map2style/arti.png",
-    #     nrow=8,
-    #     normalize=True,
-    #     range=(-1, 1),
-    # )
+        utils.save_image(
+            imgs,
+            f"map2style/fine.png",
+            nrow=8,
+            normalize=True,
+            range=(-1, 1),
+        )
 
-    # sys.exit(0)
+        utils.save_image(
+            s_imgs,
+            f"map2style/style.png",
+            nrow=8,
+            normalize=True,
+            range=(-1, 1),
+        )
+
+        utils.save_image(
+            arti_img,
+            f"map2style/arti.png",
+            nrow=8,
+            normalize=True,
+            range=(-1, 1),
+        )
+
+        sys.exit(0)
 
 
 

@@ -19,7 +19,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, MappingNetwork, G_NET, Encoder, ImplicitMixer2
+from model import Generator, MappingNetwork, G_NET, Encoder, ImplicitMixer2, Discriminator
 
 from finegan_config import finegan_config
 
@@ -153,7 +153,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 
-def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device):
+def train(args, fine_generator, style_generator, mpnet, mixer, context_discriminator, mxr_optim, ctx_optim, device):
 
     pbar = range(args.iter)
 
@@ -421,8 +421,8 @@ if __name__ == "__main__":
     args.start_iter = 0
 
     if args.mp_ckpt is not None:
-        ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
-        mp_args = ckpt['args']
+        mp_ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
+        mp_args = mp_ckpt['args']
     elif args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
         mp_args = ckpt['args']
@@ -452,6 +452,11 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
+    context_discriminator = Discriminator(
+        size=args.size,
+        channel_multiplier=args.channel_multiplier
+    ).to(device)
+
     fine_generator = G_NET(ds_name=args.ds_name).to(device)
 
     if args.mp_arch == 'vanilla':
@@ -472,6 +477,12 @@ if __name__ == "__main__":
         w_dim=args.latent,
     ).to(device)
 
+    ctx_optim = optim.Adam(
+        context_discriminator.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
+
     mxr_optim = optim.Adam(
         mixer.parameters(),
         lr=args.lr,
@@ -482,7 +493,9 @@ if __name__ == "__main__":
         print("loading checkpoint:", args.ckpt)
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
         mixer.load_state_dict(ckpt["mxr"])
+        context_discriminator.load_state_dict(ckpt["ctx"])
         mxr_optim.load_state_dict(ckpt["mxr_optim"])
+        ctx_optim.load_state_dict(ckpt["ctx_optim"])
 
         if args.mp_ckpt is None:
             mpnet.load_state_dict(ckpt["mp"])
@@ -522,4 +535,4 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="mixer net")
 
-    train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device)
+    train(args, fine_generator, style_generator, mpnet, mixer, context_discriminator, mxr_optim, ctx_optim, device)

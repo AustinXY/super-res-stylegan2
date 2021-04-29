@@ -1039,7 +1039,7 @@ class MappingNetwork(nn.Module):
         return x.view(x.size(0), self.num_ws, self.w_dim)
 
 class Encoder(nn.Module):
-    def __init__(self, size, num_ws, w_dim=512):
+    def __init__(self, size, num_ws, img_channels=3, w_dim=512):
         super().__init__()
 
         channels = {
@@ -1058,7 +1058,7 @@ class Encoder(nn.Module):
         self.n_latents = num_ws
 
         log_size = int(math.log(size, 2))
-        convs = [ConvLayer(3, channels[size], 1)]
+        convs = [ConvLayer(img_channels, channels[size], 1)]
 
         in_channel = channels[size]
         for i in range(log_size, 2, -1):
@@ -1292,3 +1292,51 @@ class ImplicitMixer2(nn.Module):
         w = torch.cat(ws, dim=1)
         w = self.final_fc(w)
         return w.view(batch, self.num_ws, self.w_dim)
+
+
+class ImgMixer(nn.Module):
+    def __init__(self, size, num_ws, img_channels=3, w_dim=512):
+        super().__init__()
+
+        channels = {
+            4: 256,
+            8: 256,
+            16: 256,
+            32: 256,
+            64: 256,
+            128: 128,
+            256: 64,
+            512: 32,
+            1024: 16
+        }
+
+        self.w_dim = w_dim
+        self.n_latents = num_ws
+
+        log_size = int(math.log(size, 2))
+        convs = [ConvLayer(img_channels, channels[size], 1)]
+
+        in_channel = channels[size]
+        for i in range(log_size, 2, -1):
+            out_channel = channels[2 ** (i - 1)]
+            convs.append(_ResBlock(in_channel, out_channel))
+            in_channel = out_channel
+
+        # convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
+
+        self.convs = nn.Sequential(*convs)
+
+        self.final_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4 * 2, channels[4] * 4 * 4,
+                        activation="fused_lrelu"),
+            EqualLinear(channels[4] * 4 * 4, w_dim * num_ws),
+        )
+
+    def forward(self, img0, img1):
+        batch = img0.size(0)
+        x0 = self.convs(img0).view(batch, -1)
+        x1 = self.convs(img1).view(batch, -1)
+
+        x = self.final_linear(torch.cat((x0, x1), dim=1))
+
+        return x.view(batch, self.n_latents, self.w_dim)
