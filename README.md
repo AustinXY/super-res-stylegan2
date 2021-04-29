@@ -10,10 +10,12 @@
 ``python3 -m torch.distributed.launch --nproc_per_node=4 --master_port=8005 train.py --batch 4 --size 512 --style_model ../data/style_model/lsuncar_512_120k.pt --fine_model ../data/fine_model/lsuncar1600k.pt ../data/LMDB/lsun100k_lmdb/``<br><br>
 7. test latent 1<br>
 test change real sampled image color using latent code -+ fine-mapped latents of same context different color<br>
-``python3 test_latent1.py --ckpt ../data/mp_model/lsuncar_120k.pt``
-8. cdn 1<br>
-Implicit mixer<br><br>
+``python3 test_latent1.py --ckpt ../data/mp_model/lsuncar_120k.pt``<br><br>
+7. cdn<br>
+decomposer/composer: decompose w code into invariant and variant parts<br><br>
+9. cdn 1<br>
+Implicit mixer: take 2 w's as input and output mixed w<br><br>
 9. cdn 2<br>
-distiller mixer<br><br>
+distiller/mixer: distill variance encoding and mix with w<br><br>
 11. cdn 4<br>
-Image mixer<br><br>
+Image mixer: take 2 images as input and output mixed w<br><br>
