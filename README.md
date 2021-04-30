@@ -21,3 +21,9 @@ distiller/mixer: distill variance encoding and mix with w<br><br>
 cdn 4<br>
 Image mixer: take 2 images as input and output mixed w<br><br>
 ___
+train<br>
+ragular mapping net<br><br>
+train1<br>
+respect stylegan syntax: only train on stylegan downsample to minimize wp mse<br><br>
+train2<br>
+create syntax: train on finegan and stylgan downsample but only inflict image mse. A discriminator will also need to be trained.
