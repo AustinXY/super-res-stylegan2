@@ -26,4 +26,4 @@ ragular mapping net<br><br>
 train1<br>
 respect stylegan syntax: only train on stylegan downsample to minimize wp mse<br><br>
 train2<br>
-create syntax: train on finegan and stylgan downsample but only inflict image mse. A discriminator will also need to be trained.
+create syntax: only train on stylgan downsample but only inflict image mse. A discriminator will also need to be trained.
