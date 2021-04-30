@@ -11,6 +11,7 @@
 7. test latent 1<br>
 test change real sampled image color using latent code -+ fine-mapped latents of same context different color<br>
 ``python3 test_latent1.py --ckpt ../data/mp_model/lsuncar_120k.pt``<br><br>
+___
 cdn<br>
 decomposer/composer: decompose w code into invariant and variant parts<br><br>
 cdn 1<br>
@@ -19,3 +20,4 @@ cdn 2<br>
 distiller/mixer: distill variance encoding and mix with w<br><br>
 cdn 4<br>
 Image mixer: take 2 images as input and output mixed w<br><br>
+___
