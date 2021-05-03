@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 
 import numpy as np
 import torch
@@ -170,6 +171,19 @@ def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, rand_code=['b', 'p']):
 
     return z, b, p, c
 
+def make_noise(batch, latent_dim, n_noise, device):
+    if n_noise == 1:
+        return torch.randn(batch, latent_dim, device=device)
+    noises = torch.randn(n_noise, batch, latent_dim, device=device).unbind(0)
+    return noises
+
+
+def mixing_noise(batch, latent_dim, prob, device):
+    if prob > 0 and random.random() < prob:
+        return make_noise(batch, latent_dim, 2, device)
+    else:
+        return [make_noise(batch, latent_dim, 1, device)]
+
 
 if __name__ == "__main__":
     device = "cuda"
@@ -180,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--params", type=str, default='map2style/params.pt', help="path to the model checkpoint")
     parser.add_argument(
-        "--batch", type=int, default=16, help="batch sizes for each gpus")
+        "--batch", type=int, default=1, help="batch sizes for each gpus")
     parser.add_argument("--thrld", type=float, default=0.1)
 
     # parser.add_argument('--load_param', type=str, default='')
@@ -242,12 +256,12 @@ if __name__ == "__main__":
     latent = None
 
     params = torch.load(args.params, map_location=lambda storage, loc: storage)
-    # z = params['z'].to(device)
-    # b = params['b'].to(device)
-    # p = params['p'].to(device)
+    z = params['z'].to(device)
+    b = params['b'].to(device)
+    p = params['p'].to(device)
     c0 = params['c0'].to(device)
-    # c1 = params['c1'].to(device)
-    latent = params['rand_latent'].to(device)
+    c1 = params['c1'].to(device)
+    # latent = params['rand_latent'].to(device)
 
     with torch.no_grad():
         _z, _b, _p, _c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
@@ -281,12 +295,14 @@ if __name__ == "__main__":
         s_imgs = torch.cat((s_imgs, s_img1), 0)
 
         if latent is None:
-            style_z = torch.randn(args.batch, 512, device=device)
-            latent = style_generator.style(style_z)
-
-        rand_img, _ = style_generator([latent],
-            input_is_latent=True,
-            randomize_noise=False)
+            noise = mixing_noise(args.batch, train_args.latent, train_args.mixing, device)
+            rand_img, latent = style_generator(noise,
+                return_latents=True,
+                randomize_noise=False)
+        else:
+            rand_img, _ = style_generator([latent],
+                input_is_latent=True,
+                randomize_noise=False)
 
         arti_wp = latent - wp0 + wp1
 

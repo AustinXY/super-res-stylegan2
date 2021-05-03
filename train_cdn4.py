@@ -221,20 +221,23 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
         # reconstruct sampled images
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        sample_img, sample_w = style_generator(noise, return_latents=True, randomize_noise=False)
+        sample_img, _ = style_generator(noise, return_latents=True, randomize_noise=False)
 
         if args.mxr_size < args.size:
-            sample_img = F.interpolate(sample_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            _sample_img = F.interpolate(sample_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
-        rec_sample_w = mixer(sample_img, sample_img)
-        rec_loss = F.mse_loss(rec_sample_w, sample_w) * args.recw
+        rec_sample_w = mixer(_sample_img, _sample_img)
+        # rec_loss = F.mse_loss(rec_sample_w, sample_w) * args.recw
+
+        rec_sample_img, _ = style_generator([rec_sample_w], input_is_latent=True, randomize_noise=False)
+        rec_loss = F.mse_loss(rec_sample_img, sample_img) * args.img_mse
 
         # mixer loss
         mxr_loss = w_loss + img_loss + rec_loss
 
         loss_dict["w"] = w_loss / args.w_mse
         loss_dict["img"] = img_loss / args.img_mse
-        loss_dict["rec"] = rec_loss / args.recw
+        loss_dict["rec"] = rec_loss / args.img_mse
 
 
         mixer.zero_grad()
@@ -431,9 +434,9 @@ if __name__ == "__main__":
         "--tie_code", action="store_true", help="use tied codes"
     )
 
-    parser.add_argument("--w_mse", type=float, default=1e1, help="mse weight for w")
-    parser.add_argument("--img_mse", type=float, default=1, help="mse weight for img")
-    parser.add_argument("--recw", type=float, default=1e1, help="mse weight for reconstruct sampled w")
+    parser.add_argument("--w_mse", type=float, default=1e-1, help="mse weight for w")
+    parser.add_argument("--img_mse", type=float, default=1e1, help="mse weight for img")
+    # parser.add_argument("--recw", type=float, default=1e1, help="mse weight for reconstruct sampled w")
 
     args = parser.parse_args()
 
@@ -468,6 +471,8 @@ if __name__ == "__main__":
     args.channel_multiplier = mp_args.channel_multiplier
     args.mp_arch = mp_args.mp_arch
     args.mixing = mp_args.mixing
+
+    args.mixing = 0.7
 
     args.z_dim = finegan_config[args.ds_name]['Z_DIM']
     args.b_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']

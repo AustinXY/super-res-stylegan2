@@ -12,7 +12,7 @@ from tqdm import tqdm
 import math
 import lpips
 
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 from model import Generator, Discriminator, MappingNetwork, Encoder
 # from finegan_config import finegan_config
@@ -59,18 +59,7 @@ def get_lr(t, initial_lr, rampdown=0.25, rampup=0.05):
 
 def latent_noise(latent, strength):
     noise = torch.randn_like(latent) * strength
-
     return latent + noise
-
-def data_sampler(dataset, shuffle, distributed):
-    if distributed:
-        return data.distributed.DistributedSampler(dataset, shuffle=shuffle)
-
-    if shuffle:
-        return data.RandomSampler(dataset)
-
-    else:
-        return data.SequentialSampler(dataset)
 
 
 def child_to_parent(c_code, c_dim, p_dim):
@@ -113,117 +102,6 @@ def manual_sample_codes(code, code_id):
     return _code
 
 
-def d_logistic_loss(real_pred, fake_pred):
-    real_loss = F.softplus(-real_pred)
-    fake_loss = F.softplus(fake_pred)
-
-    return real_loss.mean() + fake_loss.mean()
-
-
-def g_nonsaturating_loss(fake_pred):
-    loss = F.softplus(-fake_pred).mean()
-    return loss
-
-
-def train(args, loader, fine_img, style_generator, style_discriminator, mpnet, device):
-    # loader = sample_data(loader)
-
-    pbar = range(args.training_steps)
-    pbar = tqdm(pbar, initial=0, dynamic_ncols=True, smoothing=0.01)
-
-    n_mean_latent = 10000
-    with torch.no_grad():
-        noise_sample = torch.randn(n_mean_latent, 512, device=device)
-        latent_out = style_generator.style(noise_sample)
-
-        latent_mean = latent_out.mean(0)
-        latent_std = ((latent_out - latent_mean).pow(2).sum() / n_mean_latent) ** 0.5
-
-    percept = lpips.PerceptualLoss(
-        model="net-lin", net="vgg", use_gpu=device.startswith("cuda")
-    )
-
-    noises_single = style_generator.make_noise()
-    noises = []
-    for noise in noises_single:
-        noises.append(noise.repeat(imgs.shape[0], 1, 1, 1).normal_())
-
-    latent_in = mpnet(fine_img).detach().clone()
-    latent_in.requires_grad = True
-
-    for noise in noises:
-        noise.requires_grad = True
-
-    optimizer = optim.Adam([latent_in] + noises, lr=args.lr)
-
-    pbar = tqdm(range(args.training_steps))
-    latent_path = []
-
-    for i in pbar:
-        t = i / args.training_steps
-        lr = get_lr(t, args.lr)
-        optimizer.param_groups[0]["lr"] = lr
-        noise_strength = latent_std * args.noise * max(0, 1 - t / args.noise_ramp) ** 2
-        latent_n = latent_noise(latent_in, noise_strength.item())
-        img_gen, _ = style_generator([latent_n], input_is_latent=True, noise=noises)
-        fake_pred = style_discriminator(img_gen)
-
-        batch, channel, height, width = img_gen.shape
-
-        if height > 128:
-            factor = height // 128
-
-            img_gen = img_gen.reshape(
-                batch, channel, height // factor, factor, width // factor, factor
-            )
-            img_gen = img_gen.mean([3, 5])
-
-        p_loss = percept(img_gen, imgs).sum()
-        n_loss = noise_regularize(noises)
-        mse_loss = F.mse_loss(img_gen, imgs)
-        l1_loss = F.l1_loss(img_gen, imgs)
-        adv_loss = g_nonsaturating_loss(fake_pred)
-        geo_loss = loss_geocross(latent_in, style_generator.n_latent)
-
-        loss = args.vgg * p_loss + args.noise_regularize * n_loss + args.mse * \
-            mse_loss + args.adv * adv_loss + args.l1 * l1_loss + args.geo * geo_loss
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        noise_normalize_(noises)
-
-        if (i + 1) % 100 == 0:
-            latent_path.append(latent_in.detach().clone())
-
-        pbar.set_description(
-            (
-                f"perceptual: {args.vgg * p_loss.item():.4f}; adversarial: {args.adv * adv_loss.item():.4f}; geo: {args.geo * geo_loss.item():.4f}; "
-                f"noise regularize: {args.noise_regularize * n_loss.item():.4f}; mse: {args.mse * mse_loss.item():.4f}; l1: {args.l1 * l1_loss.item():.4f}; lr: {lr:.4f}"
-            )
-        )
-
-        if i % int(args.training_steps//10) == 0:
-                utils.save_image(
-                    img_gen,
-                    f"map2style/{str(i).zfill(6)}.png",
-                    nrow=8,
-                    normalize=True,
-                    range=(-1, 1),
-                )
-
-                utils.save_image(
-                    img_gen,
-                    f"map2style/curr.png",
-                    nrow=8,
-                    normalize=True,
-                    range=(-1, 1),
-                )
-
-    return img_gen
-
-
 if __name__ == "__main__":
     device = "cuda"
 
@@ -233,35 +111,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "paths", metavar="PATHS", nargs="+", help="path to image files or directory of files to be projected")
     parser.add_argument(
-        "--training_steps", type=int, default=0, help="number of training steps for the input batch of images")
-    parser.add_argument(
         "--batch", type=int, default=16, help="batch sizes for each gpus")
 
-    # training arguments if use training mode
-    parser.add_argument("--lr", type=float, default=1e-1, help="mapping network learning rate")
-    parser.add_argument("--lr_d", type=float, default=2e-4, help="discriminator learning rate")
-    parser.add_argument("--lmdb", type=str, help="path to the lmdb dataset")
-    # parser.add_argument("--load_optim", action="store_true", help="load optimiser or create new ones")
-    parser.add_argument("--vgg", type=float, default=0, help="weight of the vgg loss")
-    parser.add_argument("--mse", type=float, default=10, help="weight of the mse loss")
-    parser.add_argument("--geo", type=float, default=0, help="weight of the geo loss")
-    parser.add_argument("--l1", type=float, default=0, help="weight of the l1 loss")
-    parser.add_argument("--adv", type=float, default=1, help="weight of the adv loss")
-    parser.add_argument(
-        "--noise", type=float, default=0.05, help="strength of the noise level"
-    )
-    parser.add_argument(
-        "--noise_ramp",
-        type=float,
-        default=0.75,
-        help="duration of the noise level decay",
-    )
-    parser.add_argument(
-        "--noise_regularize",
-        type=float,
-        default=1e5,
-        help="weight of the noise regularization",
-    )
     args = parser.parse_args()
 
     resize = 128
@@ -302,9 +153,9 @@ if __name__ == "__main__":
         channel_multiplier=train_args.channel_multiplier
     ).to(device)
 
-    style_discriminator = Discriminator(
-        size=train_args.size
-    ).to(device)
+    # style_discriminator = Discriminator(
+    #     size=train_args.size
+    # ).to(device)
 
     if train_args.mp_arch == 'vanilla':
         mpnet = MappingNetwork(
@@ -320,11 +171,11 @@ if __name__ == "__main__":
         ).to(device)
 
     style_generator.load_state_dict(ckpt["style_g"])
-    style_discriminator.load_state_dict(ckpt["style_d"])
+    # style_discriminator.load_state_dict(ckpt["style_d"])
     mpnet.load_state_dict(ckpt["mp"])
 
     style_generator.eval()
-    style_discriminator.eval()
+    # style_discriminator.eval()
     mpnet.eval()
 
     with torch.no_grad():
@@ -333,41 +184,7 @@ if __name__ == "__main__":
             input_is_latent=True,
             randomize_noise=False)
 
-        print(style_discriminator(style_img))
-
-    if args.training_steps > 0:
-        from dataset import MultiResolutionDataset
-        from torch.utils import data
-
-        # d_optim = optim.Adam(
-        #     style_discriminator.parameters(),
-        #     lr=args.lr_d,
-        #     betas=(0, 0.99),
-        # )
-
-        # if args.load_optim:
-        #     mp_optim.load_state_dict(ckpt["mp_optim"])
-        #     d_optim.load_state_dict(ckpt["d_optim"])
-
-        # transform = transforms.Compose(
-        #     [
-        #         transforms.RandomHorizontalFlip(),
-        #         transforms.ToTensor(),
-        #         transforms.Normalize(
-        #             (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-        #     ]
-        # )
-
-        # dataset = MultiResolutionDataset(args.lmdb, transform, train_args.size)
-        # loader = data.DataLoader(
-        #     dataset,
-        #     batch_size=batch,
-        #     sampler=data_sampler(dataset, shuffle=True, distributed=False),
-        #     drop_last=True,
-        # )
-        loader = None
-
-        style_img = train(args, loader, imgs, style_generator, style_discriminator, mpnet, device)
+        # print(style_discriminator(style_img))
 
     utils.save_image(
         style_img,
