@@ -8,7 +8,7 @@ from torch import nn, autograd, optim
 from torch.nn import functional as F
 from torchvision import transforms, utils
 
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 from model import G_NET
 from finegan_config import finegan_config
@@ -25,6 +25,7 @@ def child_to_parent(c_code, c_dim, p_dim):
 
 def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
     z = torch.randn(batch, z_dim, device=device)
+    z_fg = torch.randn(batch, z_dim, device=device)
     c = torch.zeros(batch, c_dim, device=device)
     cid = np.random.randint(c_dim, size=batch)
     for i in range(batch):
@@ -32,7 +33,7 @@ def sample_codes(batch, z_dim, b_dim, p_dim, c_dim, device):
 
     p = child_to_parent(c, c_dim, p_dim)
     b = c.clone()
-    return z, b, p, c
+    return z, b, p, c, z_fg
 
 
 def rand_sample_codes(prev_z, prev_b, prev_p, prev_c, rand_code=['z', 'b', 'p', 'c']):
@@ -135,19 +136,19 @@ if __name__ == "__main__":
     fine_generator.eval()
     with torch.no_grad():
         img_li = []
-        z, b, p, c = sample_codes(args.batch, args.z_dim,
+        z, b, p, c, z_fg = sample_codes(args.batch, args.z_dim,
                                 args.b_dim, args.p_dim, args.c_dim, device)
         for i in range(args.n_sample):
-            p = manual_sample_codes(p, [i+10])
-            fine_img = fine_generator(z, b, p, c, rtn_img=args.rtn_img)
+            # p = manual_sample_codes(p, [i+10])
+            fine_img = fine_generator(z, b, p, c, z_fg=z_fg, rtn_img=args.rtn_img)
             # fine_img = fine_generator(z, b, p, c, rtn_img='pmk')
             img_li.append(fine_img)
-            # z, b, p, c = rand_sample_codes(z, b, p, c, rand_code=args.rand_code)
+            z_fg, b, p, c = rand_sample_codes(z, b, p, c, rand_code=args.rand_code)
 
         fnl_img = None
 
         _range = (-1, 1)
-        if args.rtn_img == 'pmk':
+        if 'mk' in args.rtn_img:
             _range = (0, 1)
 
         for i in range(len(img_li)):
