@@ -11,11 +11,19 @@
 7. test latent 1<br>
 test change real sampled image color using latent code -+ fine-mapped latents of same context different color<br>
 ``python3 test_latent1.py --ckpt ../data/mp_model/lsuncar_120k.pt``<br><br>
-7. cdn<br>
+___
+cdn<br>
 decomposer/composer: decompose w code into invariant and variant parts<br><br>
-9. cdn 1<br>
+cdn 1<br>
 Implicit mixer: take 2 w's as input and output mixed w<br><br>
-9. cdn 2<br>
+cdn 2<br>
 distiller/mixer: distill variance encoding and mix with w<br><br>
-11. cdn 4<br>
+cdn 4<br>
 Image mixer: take 2 images as input and output mixed w<br><br>
+___
+train<br>
+ragular mapping net<br><br>
+train1<br>
+respect stylegan syntax: only train on stylegan downsample to minimize wp mse<br><br>
+train2<br>
+create syntax: only train on stylgan downsample but only inflict image mse. A discriminator will also need to be trained.
