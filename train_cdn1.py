@@ -19,7 +19,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, MappingNetwork, G_NET, Encoder, ImplicitMixer2
+from model import Generator, MappingNetwork, G_NET, Encoder, ImplicitMixer2, ImplicitMixer
 
 from finegan_config import finegan_config
 
@@ -216,8 +216,8 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
             img_loss = torch.zeros(1, device=device)
 
         mxr_loss = w_loss + img_loss
-        loss_dict["w"] = w_loss
-        loss_dict["img"] = img_loss
+        loss_dict["w"] = w_loss / args.w_mse
+        loss_dict["img"] = img_loss / args.img_mse
 
         mixer.zero_grad()
         mxr_loss.backward()
@@ -243,7 +243,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     }
                 )
 
-            if i % 1000 == 0:
+            if i % 500 == 0:
                 with torch.no_grad():
                     mixer.eval()
 
@@ -259,12 +259,10 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
                     shape_w = mpnet(shape_img)
                     color_w = mpnet(color_img)
-                    target_w = mpnet(target_img)
                     mix_w = mixer(shape_w, color_w)
 
                     _shape_img, _ = style_generator([shape_w], input_is_latent=True)
                     _color_img, _ = style_generator([color_w], input_is_latent=True)
-                    _target_img, _ = style_generator([target_w], input_is_latent=True)
                     _mix_img, _ = style_generator([mix_w], input_is_latent=True)
 
                     noise1 = mixing_noise(args.n_sample, args.latent, args.mixing, device)
@@ -298,7 +296,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        _target_img,
+                        _mix_img,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_2.png",
                         nrow=8,
                         normalize=True,
@@ -306,7 +304,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        _mix_img,
+                        sample_img1,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_3.png",
                         nrow=8,
                         normalize=True,
@@ -314,7 +312,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        sample_img1,
+                        sample_img2,
                         f"cdn_training_dir/sample/{str(i).zfill(6)}_4.png",
                         nrow=8,
                         normalize=True,
@@ -322,16 +320,8 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     )
 
                     utils.save_image(
-                        sample_img2,
-                        f"cdn_training_dir/sample/{str(i).zfill(6)}_5.png",
-                        nrow=8,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
-
-                    utils.save_image(
                         mix_sample,
-                        f"cdn_training_dir/sample/{str(i).zfill(6)}_6.png",
+                        f"cdn_training_dir/sample/{str(i).zfill(6)}_5.png",
                         nrow=8,
                         normalize=True,
                         range=(-1, 1),
@@ -340,8 +330,12 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "fine mix": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
-                                "style mix": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_6.png").convert("RGB"))]
+                                "fine shape": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "fine color": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "fine mix": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "style shape": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "style color": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
+                                "style mix": [wandb.Image(Image.open(f"cdn_training_dir/sample/{str(i).zfill(6)}_5.png").convert("RGB"))]
                             }
                         )
 
@@ -387,6 +381,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="path to mapping ckpt",
+    )
+    parser.add_argument(
+        "--fine_ckpt",
+        type=str,
+        default=None,
+        help="path to fine ckpt",
     )
     parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
     parser.add_argument(
@@ -487,6 +487,8 @@ if __name__ == "__main__":
         if args.mp_ckpt is None:
             mpnet.load_state_dict(ckpt["mp"])
             style_generator.load_state_dict(ckpt["style_g"])
+
+        if args.fine_ckpt is None:
             fine_generator.load_state_dict(ckpt["fine"])
 
     if args.mp_ckpt is not None:
@@ -494,7 +496,12 @@ if __name__ == "__main__":
         mp_ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
         mpnet.load_state_dict(mp_ckpt["mp"])
         style_generator.load_state_dict(mp_ckpt["style_g"])
-        fine_generator.load_state_dict(mp_ckpt["fine"])
+        # fine_generator.load_state_dict(mp_ckpt["fine"])
+
+    if args.fine_ckpt is not None:
+        print("load fine model:", args.fine_ckpt)
+        fine_ckpt = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
+        fine_generator.load_state_dict(fine_ckpt)
 
     if args.distributed:
         sys.exit()

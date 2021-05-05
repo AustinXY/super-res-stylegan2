@@ -1078,7 +1078,7 @@ class Encoder(nn.Module):
 
 
 class LinearModule(nn.Module):
-    def __init__(self, in_channel, out_channel, activation=True, normalize=True):
+    def __init__(self, in_channel, out_channel, activation=True, normalize=False):
         super().__init__()
         if normalize:
             self.fc = nn.Sequential(
@@ -1209,16 +1209,17 @@ class ImplicitMixer(nn.Module):
         self.num_ws = num_ws
         self.w_dim = w_dim
         full_dim = num_ws * w_dim
-        self.fc0 = LinearModule(full_dim*2, full_dim)
-        self.fc1 = LinearModule(full_dim, full_dim)
-        self.fc2 = LinearModule(full_dim, full_dim)
+        self.fc = nn.Sequential(
+            LinearModule(full_dim*2, full_dim*2),
+            LinearModule(full_dim*2, full_dim),
+            LinearModule(full_dim, full_dim),
+            LinearModule(full_dim, full_dim, activation=False, normalize=False)
+        )
 
     def forward(self, w0, w1):
         batch = w0.size(0)
         in_w = torch.cat((w0.view(batch, -1), w1.view(batch, -1)), dim=1)
         w = self.fc0(in_w)
-        w = self.fc1(w)
-        w = self.fc2(w)
         return w.view(batch, self.num_ws, self.w_dim)
 
 
@@ -1270,13 +1271,16 @@ class ImplicitMixer2(nn.Module):
         for _ in range(num_ws):
             self.layers.append(
                 nn.Sequential(
-                    LinearModule(w_dim*2, w_dim*2),
-                    LinearModule(w_dim*2, w_dim*2),
+                    LinearModule(w_dim*2, w_dim*2, normalize=True),
+                    # LinearModule(w_dim*2, w_dim*2),
                     LinearModule(w_dim*2, w_dim),
+                    # LinearModule(w_dim, w_dim),
                 )
             )
 
         self.final_fc = nn.Sequential(
+            # LinearModule(full_dim, full_dim),
+            LinearModule(full_dim, full_dim, normalize=True),
             LinearModule(full_dim, full_dim),
             LinearModule(full_dim, full_dim, activation=False, normalize=False),
         )
@@ -1484,6 +1488,9 @@ class G_NET(nn.Module):
         mk_imgs = []  # Will contain [parent mask, child mask]
         fg_mk = []  # Will contain [masked parent foreground, masked child foreground]
 
+        if z_fg is None:
+            z_fg = z_code.clone()
+
         # Background stage
         temp = self.background_stage( z_code, b_code )
         fake_img1 = self.background_image( temp )  # Background image
@@ -1491,7 +1498,7 @@ class G_NET(nn.Module):
         fake_imgs.append(fake_img1_126)
 
         # Parent stage
-        p_temp = self.parent_stage(z_code, p_code)
+        p_temp = self.parent_stage(z_fg, p_code)
         fake_img2_foreground = self.parent_image(p_temp)  # Parent foreground
         fake_img2_mask = self.parent_mask(p_temp)  # Parent mask
         fg_masked2 = fake_img2_foreground*fake_img2_mask # masked_parent
@@ -1519,5 +1526,7 @@ class G_NET(nn.Module):
             rtn = fake_img3_mask
         elif rtn_img == 'bg':
             rtn = fake_img1
+        elif rtn_img == 'cmsk':
+            rtn = fg_masked3
 
         return rtn
