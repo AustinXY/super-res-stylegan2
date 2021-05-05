@@ -268,22 +268,6 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_opti
         mpnet.train()
         mknet.train()
 
-        ############# train mapping network #############
-        mpnet.requires_grad_(True)
-
-        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-
-        style_img, latent = style_generator(noise, return_latents=True, randomize_noise=False)
-        _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-        wp_code = mpnet(_style_img)
-
-        mp_loss = F.mse_loss(wp_code, latent) * args.mp
-        loss_dict["mp"] = mp_loss / args.mp
-
-        mpnet.zero_grad()
-        mp_loss.backward()
-        mp_optim.step()
-
         ############# train mk network #############
         mknet.requires_grad_(True)
         # mpnet.requires_grad_(False)
@@ -306,16 +290,62 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_opti
         mknet_loss.backward()
         mk_optim.step()
 
+        ############# train mapping network #############
+        mpnet.requires_grad_(True)
+        mknet.requires_grad_(False)
+
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+
+        style_img, latent = style_generator(noise, return_latents=True, randomize_noise=False)
+        _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
+        wp_code = mpnet(_style_img)
+
+        mp_loss = F.mse_loss(wp_code, latent) * args.mp
+        loss_dict["mp"] = mp_loss / args.mp
+
+        z, b, p, c0 = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if not args.tie_code:
+            z, b, p, c0 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c0, rand_code=['b', 'p'])
+
+        _, _, _, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c0, rand_code=['c'])
+
+        fine_img0, _ = fine_generator(z, b, p, c0)
+        fine_img1, _ = fine_generator(z, b, p, c1)
+        w0 = mpnet(fine_img0)
+        w1 = mpnet(fine_img1)
+        fine_img0, _ = style_generator([w0], input_is_latent=True, randomize_noise=False)
+        fine_img1, _ = style_generator([w1], input_is_latent=True, randomize_noise=False)
+        fine_img0 = F.interpolate(fine_img0, size=(128, 128), mode='area')
+        fine_img1 = F.interpolate(fine_img1, size=(128, 128), mode='area')
+        mask0 = mknet(fine_img0)
+        mask1 = mknet(fine_img1)
+        bg_mask0 = torch.ones_like(mask0) - mask0
+        bg_mask1 = torch.ones_like(mask1) - mask1
+
+        fg_sim = F.mse_loss(mask0, mask1)
+        bg_sim = F.cosine_similarity((bg_mask0 * fine_img0).view(args.batch, -1), (
+            bg_mask1 * fine_img1).view(args.batch, -1)).mean()
+
+        sim_loss = fg_sim + bg_sim
+        loss_dict["sim"] = sim_loss
+
+        mp_loss += sim_loss
+
+        mpnet.zero_grad()
+        mp_loss.backward()
+        mp_optim.step()
+
         ############# ############# #############
         loss_reduced = reduce_loss_dict(loss_dict)
         mp_loss_val = loss_reduced["mp"].mean().item()
         mk_loss_val = loss_reduced["mk"].mean().item()
         bin_loss_val = loss_reduced["bin"].mean().item()
+        sim_loss_val = loss_reduced["sim"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"mp: {mp_loss_val:.4f}; mk: {mk_loss_val:.4f}; bin: {bin_loss_val:.4f}"
+                    f"mp: {mp_loss_val:.4f}; mk: {mk_loss_val:.4f}; bin: {bin_loss_val:.4f}, sim: {sim_loss_val:.4f}"
                 )
             )
 
@@ -325,6 +355,7 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_opti
                         "MP": mp_loss_val,
                         "MK": mk_loss_val,
                         "Bin": bin_loss_val,
+                        "Sim": sim_loss_val,
                     }
                 )
 
@@ -567,14 +598,16 @@ if __name__ == "__main__":
         args.start_iter = ckpt['cur_iter']
 
         mpnet.load_state_dict(ckpt["mp"])
+        mknet.load_state_dict(ckpt["mk"])
+
 
         if args.style_model is None:
             style_generator.load_state_dict(ckpt["style_g"])
-
             mp_optim.load_state_dict(ckpt["mp_optim"])
 
         if args.fine_model is None:
             fine_generator.load_state_dict(ckpt["fine"])
+            mk_optim.load_state_dict(ckpt["mk_optim"])
 
     # if specify stylegan checkpoint, overwrite stylegan from ckpt
     if args.style_model is not None:
