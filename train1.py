@@ -4,6 +4,8 @@ import random
 import os
 import copy
 
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
+
 from numpy.core.fromnumeric import resize
 import dnnlib
 
@@ -299,7 +301,6 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_opti
         mknet_loss = mk_loss + bin_loss
         loss_dict["mk"] = mk_loss / args.mk
         loss_dict["bin"] = bin_loss / args.bin
-
 
         mknet.zero_grad()
         mknet_loss.backward()
