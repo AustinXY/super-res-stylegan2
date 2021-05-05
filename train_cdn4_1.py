@@ -21,7 +21,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, MappingNetwork, G_NET, Encoder, ImgMixer
+from model import Generator, G_NET, Encoder, ImgMixer
 
 from finegan_config import finegan_config
 
@@ -392,7 +392,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 40000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "style_g": style_g_module.state_dict(),

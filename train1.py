@@ -401,7 +401,7 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_opti
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 40000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "style_g": style_g_module.state_dict(),
