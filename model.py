@@ -1320,7 +1320,7 @@ class ImplicitMixer2(nn.Module):
                 nn.Sequential(
                     LinearModule(w_dim*2, w_dim*2, normalize=True),
                     # LinearModule(w_dim*2, w_dim*2),
-                    LinearModule(w_dim*2, w_dim, normalize=True),
+                    LinearModule(w_dim*2, w_dim),
                     # LinearModule(w_dim, w_dim),
                 )
             )
@@ -1578,5 +1578,7 @@ class G_NET(nn.Module):
             rtn = fake_img3_mask
         elif rtn_type == 'bg':
             rtn = fake_img1
+        elif rtn_type == 'cmsk':
+            rtn = fg_masked3
 
         return rtn, None
