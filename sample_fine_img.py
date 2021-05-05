@@ -132,6 +132,7 @@ if __name__ == "__main__":
     fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
     fine_generator.load_state_dict(fine_dict)
 
+
     #########
     fine_generator.eval()
     with torch.no_grad():
