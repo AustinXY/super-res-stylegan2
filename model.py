@@ -904,7 +904,6 @@ class ____G_NET(nn.Module):
         self.scale_fimg = nn.UpsamplingBilinear2d(size=[126, 126])
 
     def define_module(self):
-
         #Background stage
         self.h_net1_bg = INIT_STAGE_G(self.gf_dim * 16, 2, ds_name=self.ds_name)
         # Background generation network
@@ -925,7 +924,7 @@ class ____G_NET(nn.Module):
         # Child mask generation network
         self.img_net3_mask = GET_MASK(self.gf_dim // 4)
 
-    def forward(self, z_code, bg_code, p_code, c_code, z_fg=None, rtn_img='fnl'):
+    def forward(self, z_code, bg_code, p_code, c_code, z_fg=None, rtn_type='fnl', rtn_mk=False):
 
         fake_imgs = []  # Will contain [background image, parent image, child image]
         fg_imgs = []  # Will contain [parent foreground, child foreground]
@@ -968,16 +967,18 @@ class ____G_NET(nn.Module):
         fg_imgs.append(fake_img3_foreground)
         mk_imgs.append(fake_img3_mask)
 
+        if rtn_mk:
+            return fake_img3_final, fake_img2_mask
+
         # return fake_imgs, fg_imgs, mk_imgs, fg_mk
         rtn = fake_img3_final
-        if rtn_img == 'pmk':
+        if rtn_type == 'pmk':
             rtn = fake_img2_mask
-        elif rtn_img == 'cmk':
+        elif rtn_type == 'cmk':
             rtn = fake_img3_mask
-        elif rtn_img == 'bg':
+        elif rtn_type == 'bg':
             rtn = fake_img1
-
-        return rtn
+        return rtn, None
 
 #----------------------------------------------------------------------------
 
@@ -993,7 +994,7 @@ class DoubleConv(nn.Module):
 
         self.conv2 = nn.Sequential(
             ConvLayer(out_channel, out_channel, 3,
-                      activate=False, downsample=True),
+                      activate=False, downsample=False),
             nn.BatchNorm2d(out_channel),
             nn.LeakyReLU(0.2, inplace=True),
         )
@@ -1003,42 +1004,88 @@ class DoubleConv(nn.Module):
         out = self.conv2(out)
         return out
 
+class Down(nn.Module):
+    """Downscaling with maxpool then double conv"""
 
-class MappingNetwork(nn.Module):
-    def __init__(self, num_ws, w_dim):
+    def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.num_ws = num_ws
-        self.w_dim = w_dim
-        self.inc = nn.Sequential(
-            ConvLayer(3, 64, 3, activate=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-        self.down1 = DoubleConv(64, 128)
-        self.down2 = DoubleConv(128, 256)
-        self.down3 = DoubleConv(256, 512)
-        self.down4 = DoubleConv(512, 512)
-        self.down5 = DoubleConv(512, 512)
-
-        self.final_linear = nn.Sequential(
-            EqualLinear(512 * 4 * 4, num_ws * w_dim),
-            nn.BatchNorm1d(num_ws * w_dim),
-            nn.LeakyReLU(0.2, inplace=True),
-            EqualLinear(num_ws * w_dim, num_ws * w_dim),
-            nn.BatchNorm1d(num_ws * w_dim),
-            nn.LeakyReLU(0.2, inplace=True),
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
         )
 
-    def forward(self, input):
-        x = self.inc(input)
-        x = self.down1(x)  # 64 x 64
-        x = self.down2(x)  # 32 x 32
-        x = self.down3(x)  # 16 x 16
-        x = self.down4(x)  # 8 x 8
-        x = self.down5(x)  # 4 x 4
-        # x = self.down6(x)  # 1 x 1
-        x = self.final_linear(x.view(x.size(0), -1))
-        return x.view(x.size(0), self.num_ws, self.w_dim)
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class Up(nn.Module):
+    """Upscaling then double conv"""
+
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+
+        # if bilinear, use the normal convolutions to reduce the number of channels
+        if bilinear:
+            self.up = nn.Upsample(
+                scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+        else:
+            self.up = nn.ConvTranspose2d(
+                in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # input is CHW
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        # if you have padding issues, see
+        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
+        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class UNet(nn.Module):
+    def __init__(self, n_channels, n_classes, bilinear=True):
+        super(UNet, self).__init__()
+        self.inc = DoubleConv(n_channels, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
+        factor = 2 if bilinear else 1
+        self.down4 = Down(512, 1024 // factor)
+        self.up1 = Up(1024, 512 // factor, bilinear)
+        self.up2 = Up(512, 256 // factor, bilinear)
+        self.up3 = Up(256, 128 // factor, bilinear)
+        self.up4 = Up(128, 64, bilinear)
+        self.outc = OutConv(64, n_classes)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        logits = torch.sigmoid(self.outc(x))
+        return logits
+
 
 class Encoder(nn.Module):
     def __init__(self, size, num_ws, img_channels=3, w_dim=512):
@@ -1481,7 +1528,7 @@ class G_NET(nn.Module):
         self.child_image = GET_IMAGE( ngf//4 )
         self.child_mask = GET_MASK( ngf//4 )
 
-    def forward(self, z_code, b_code, p_code, c_code, z_fg=None, rtn_img='fnl'):
+    def forward(self, z_code, b_code, p_code, c_code, z_fg=None, rtn_type='fnl', rtn_mk=False):
 
         fake_imgs = []  # Will contain [background image, parent image, child image]
         fg_imgs = []  # Will contain [parent foreground, child foreground]
@@ -1519,14 +1566,17 @@ class G_NET(nn.Module):
         fg_imgs.append(fake_img3_foreground)
         mk_imgs.append(fake_img3_mask)
 
+        if rtn_mk:
+            return fake_img3, fake_img2_mask
+
         rtn = fake_img3
-        if rtn_img == 'pmk':
+        if rtn_type == 'pmk':
             rtn = fake_img2_mask
-        elif rtn_img == 'cmk':
+        elif rtn_type == 'cmk':
             rtn = fake_img3_mask
-        elif rtn_img == 'bg':
+        elif rtn_type == 'bg':
             rtn = fake_img1
-        elif rtn_img == 'cmsk':
+        elif rtn_type == 'cmsk':
             rtn = fg_masked3
 
-        return rtn
+        return rtn, None
