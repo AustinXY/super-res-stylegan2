@@ -21,7 +21,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, G_NET, Encoder, ImgMixer
+from model import Generator, G_NET, Encoder, ImgMixer, UNet
 
 from finegan_config import finegan_config
 
@@ -154,7 +154,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 
-def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device):
+def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim, device):
 
     pbar = range(args.iter)
 
@@ -166,11 +166,13 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
     if args.distributed:
         mp_module = mpnet.module
+        mk_module = mknet.module
         fine_g_module = fine_generator.module
         style_g_module = style_generator.module
         mxr_module = mixer.module
     else:
         mp_module = mpnet
+        mk_module = mknet
         fine_g_module = fine_generator
         style_g_module = style_generator
         mxr_module = mixer
@@ -181,6 +183,8 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
     style_generator.requires_grad_(False)
     mpnet.eval()
     mpnet.requires_grad_(False)
+    mknet.eval()
+    mknet.requires_grad_(False)
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -198,7 +202,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
         z1, b1, p1, c1 = rand_sample_codes(prev_z=z0, prev_b=b0, prev_p=p0, prev_c=c0, rand_code=['z', 'b', 'p', 'c'])
 
-        shape_img, shape_mask = fine_generator(z0, b0, p0, c0, rtn_mk=True)
+        shape_img, _ = fine_generator(z0, b0, p0, c0)
         color_img, _ = fine_generator(z1, b1, p1, c1)
         target_img, _ = fine_generator(z0, b0, p0, c1)
 
@@ -230,18 +234,29 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
             img_loss = torch.zeros(1, device=device)
 
         if args.preserve_bg:
-            if not args.constrain_img:
-                mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
+            shape_img = shape_img[0:args.batch//2]
+            mix_w = mix_w[0:args.batch//2]
+            mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
 
             if args.mxr_size < args.size:
                 mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
-            bg_mask = torch.ones_like(shape_mask) - shape_mask
-            shape_bg = shape_img * bg_mask
-            mix_bg = mix_img * bg_mask
-            bg_loss = F.mse_loss(mix_bg[0:args.batch//2], shape_bg[0:args.batch//2]) * args.bg_prsv
+            shape_mask = mknet(shape_img)
+            mix_mask = mknet(mix_img)
+            shape_bg = shape_img * torch.ones_like(shape_mask) - shape_mask
+            mix_bg = mix_img * torch.ones_like(mix_mask) - mix_mask
+            bg_loss = F.mse_loss(mix_bg, shape_bg) * args.bg_prsv
         else:
             bg_loss = torch.zeros(1, device=device)
+
+        mxr_loss = w_loss + img_loss + bg_loss
+        loss_dict["w"] = w_loss / args.w_mse
+        loss_dict["img"] = img_loss / args.img_mse
+        loss_dict["bg"] = bg_loss / args.bg_prsv
+
+        mixer.zero_grad()
+        mxr_loss.backward()
+        mxr_optim.step()
 
         if args.recon_sample:
             # reconstruct sampled images
@@ -253,20 +268,17 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
             rec_sample_w = mixer(sample_img, sample_img)
             rec_loss = F.mse_loss(rec_sample_w, sample_w) * args.recw
+            loss_dict["rec"] = rec_loss / args.recw
             # rec_sample_img, _ = style_generator([rec_sample_w], input_is_latent=True, randomize_noise=False)
             # rec_loss = F.mse_loss(rec_sample_img, sample_img) * args.img_mse
+
+            mixer.zero_grad()
+            rec_loss.backward()
+            mxr_optim.step()
+
         else:
-            rec_loss = torch.zeros(1, device=device)
+            loss_dict["rec"] = torch.zeros(1, device=device)
 
-        mxr_loss = w_loss + img_loss + bg_loss + rec_loss
-        loss_dict["w"] = w_loss / args.w_mse
-        loss_dict["img"] = img_loss / args.img_mse
-        loss_dict["bg"] = bg_loss / args.bg_prsv
-        loss_dict["rec"] = rec_loss / args.recw
-
-        mixer.zero_grad()
-        mxr_loss.backward()
-        mxr_optim.step()
 
         ############# ############# #############
         loss_reduced = reduce_loss_dict(loss_dict)
@@ -398,6 +410,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                         "style_g": style_g_module.state_dict(),
                         "fine": fine_g_module.state_dict(),
                         "mp": mp_module.state_dict(),
+                        "mk": mk_module.state_dict(),
                         "mxr": mxr_module.state_dict(),
                         "mxr_optim": mxr_optim.state_dict(),
                         "args": args,
@@ -470,7 +483,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--w_mse", type=float, default=1e1, help="mse weight for w")
     parser.add_argument("--img_mse", type=float, default=1e1, help="mse weight for img")
-    parser.add_argument("--bg_prsv", type=float, default=1e-2, help="mse weight for img")
+    parser.add_argument("--bg_prsv", type=float, default=1e1, help="mse weight for img")
     parser.add_argument("--recw", type=float, default=1, help="reconstruct sample w")
 
     args = parser.parse_args()
@@ -541,6 +554,12 @@ if __name__ == "__main__":
         w_dim=args.latent
     ).to(device)
 
+    mknet = UNet(
+        n_channels = 3,
+        n_classes = 1,
+        bilinear = True,
+    ).to(device)
+
     mxr_optim = optim.Adam(
         mixer.parameters(),
         lr=args.lr,
@@ -555,6 +574,7 @@ if __name__ == "__main__":
 
         if args.mp_ckpt is None:
             mpnet.load_state_dict(ckpt["mp"])
+            mknet.load_state_dict(ckpt["mk"])
             style_generator.load_state_dict(ckpt["style_g"])
 
         if args.fine_ckpt is None:
@@ -564,6 +584,7 @@ if __name__ == "__main__":
         print("load mapping model:", args.mp_ckpt)
         mp_ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
         mpnet.load_state_dict(mp_ckpt["mp"])
+        mknet.load_state_dict(mp_ckpt["mk"])
         style_generator.load_state_dict(mp_ckpt["style_g"])
         # fine_generator.load_state_dict(mp_ckpt["fine"])
 
@@ -598,4 +619,4 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="image mixer net")
 
-    train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device)
+    train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim, device)
