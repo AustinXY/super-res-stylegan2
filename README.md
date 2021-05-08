@@ -24,6 +24,8 @@ cdn 4_1<br>
 Image mixer: with background preservation<br><br>
 cdn 4_2<br>
 Image mixer: stitch shape bg to mixed fg<br><br>
+cdn 4_3<br>
+Image mixer: No mpnet; just require mix image to have same background as shape img and same mean color as color img?<br><br>
 ___
 train<br>
 ragular mapping net<br><br>
