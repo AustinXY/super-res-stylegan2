@@ -20,6 +20,12 @@ cdn 2<br>
 distiller/mixer: distill variance encoding and mix with w<br><br>
 cdn 4<br>
 Image mixer: take 2 images as input and output mixed w<br><br>
+cdn 4_1<br>
+Image mixer: with background preservation<br><br>
+cdn 4_2<br>
+Image mixer: constrain on image<br><br>
+cdn 4_3<br>
+Image mixer: No mpnet; just require mix image to have same background as shape img and same mean color as color img?<br><br>
 ___
 train<br>
 ragular mapping net<br><br>
