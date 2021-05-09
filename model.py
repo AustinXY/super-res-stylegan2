@@ -1383,8 +1383,8 @@ class ImgMixer(nn.Module):
 
         self.final_linear = nn.Sequential(
             EqualLinear(channels[4] * 4 * 4 * 2, channels[4] * 4 * 4, activation="fused_lrelu"),
-            EqualLinear(channels[4] * 4 * 4, w_dim * num_ws, activation="fused_lrelu"),
-            EqualLinear(w_dim * num_ws, w_dim * num_ws),
+            EqualLinear(channels[4] * 4 * 4, w_dim * num_ws),
+            # EqualLinear(w_dim * num_ws, w_dim * num_ws),
         )
 
     def forward(self, img0, img1):

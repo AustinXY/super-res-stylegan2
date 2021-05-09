@@ -5,7 +5,7 @@ import os
 import copy
 import sys
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
 from numpy.core.fromnumeric import resize
 import dnnlib
@@ -106,7 +106,6 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     '''
     rand code default: keeping z and c
     '''
-
     if prev_z is not None:
         device = prev_z.device
         batch = prev_z.size(0)
@@ -232,19 +231,20 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
         color_img, _ = style_generator([color_w], input_is_latent=True, randomize_noise=False)
         target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
 
+        if args.mxr_size < args.size:
+            shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
+
+        mix_w = mixer(shape_img, color_img)
+        mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
+
         if args.constrain_img:
             img_loss = F.mse_loss(mix_img, target_img) * args.img_mse
         else:
             img_loss = torch.zeros(1, device=device)[0]
 
         if args.mxr_size < args.size:
-            shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
-            color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
             target_img = F.interpolate(target_img, size=(args.mxr_size, args.mxr_size), mode='area')
-
-        mix_w = mixer(shape_img, color_img)
-        mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
-        if args.mxr_size < args.size:
             mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
         if args.constrain_w:
@@ -444,7 +444,7 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
                         "args": args,
                         "cur_iter": i,
                     },
-                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}_4_1.pt",
+                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}_4_2.pt",
                 )
 
 
@@ -517,7 +517,7 @@ if __name__ == "__main__":
     parser.add_argument("--mk_pdpx", type=int, default=3, help="Threshold for mask")
 
     parser.add_argument("--w_mse", type=float, default=5, help="mse weight for w")
-    parser.add_argument("--img_mse", type=float, default=1e1, help="mse weight for img")
+    parser.add_argument("--img_mse", type=float, default=5, help="mse weight for img")
     parser.add_argument("--bg_prsv", type=float, default=1e1, help="mse weight for bg")
     parser.add_argument("--fg_prsv", type=float, default=1e1, help="mse weight for img")
     parser.add_argument("--recw", type=float, default=1, help="reconstruct sample w")
