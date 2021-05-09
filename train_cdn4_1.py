@@ -238,33 +238,28 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
             img_loss = torch.zeros(1, device=device)[0]
 
         if args.mxr_size < args.size:
-            shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
-            color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
-            target_img = F.interpolate(target_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            _shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            _color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
-        mix_w = mixer(shape_img, color_img)
+        mix_w = mixer(_shape_img, _color_img)
         mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
         if args.mxr_size < args.size:
-            mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            _mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
         if args.constrain_w:
             w_loss = F.mse_loss(mix_w, target_w) * args.w_mse
         else:
             w_loss = torch.zeros(1, device=device)[0]
 
-        if args.constrain_shp:
-            shape_mask = process_mask(mknet(shape_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-            mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-            shp_loss = F.mse_loss(mix_mask, shape_mask) * args.shp
-        else:
-            shp_loss = torch.zeros(1, device=device)[0]
-
         if args.preserve_bg:
             # shape_img = shape_img[0:args.batch//2]
             # mix_w = mix_w[0:args.batch//2]
-            if not args.constrain_shp:
-                shape_mask = process_mask(mknet(shape_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-                mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            shape_mask = mknet(_shape_img)
+            mix_mask = mknet(_mix_img)
+            shape_mask = F.interpolate(shape_mask, size=(args.size, args.size), mode='area')
+            mix_mask = F.interpolate(mix_mask, size=(args.size, args.size), mode='area')
+            shape_mask = process_mask(shape_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            mix_mask = process_mask(mix_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
 
             shape_bg = shape_img * (torch.ones_like(shape_mask) - shape_mask)
             mix_bg = mix_img * (torch.ones_like(mix_mask) - mix_mask)
@@ -274,21 +269,28 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
 
         if args.preserve_fg:
             if not args.preserve_bg:
-                mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+                mix_mask = mknet(_mix_img)
+                mix_mask = F.interpolate(mix_mask, size=(args.size, args.size), mode='area')
+                mix_mask = process_mask(mix_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
 
-            target_mask = process_mask(mknet(target_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            if args.mxr_size < args.size:
+                _target_img = F.interpolate(target_img, size=(args.mxr_size, args.mxr_size), mode='area')
+
+            target_mask = mknet(_target_img)
+            target_mask = F.interpolate(target_mask, size=(args.size, args.size), mode='area')
+            target_mask = process_mask(target_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+
             target_fg = target_img * target_mask
             mix_fg = mix_img * mix_mask
             fg_loss = F.mse_loss(mix_fg, target_fg) * args.fg_prsv
         else:
             fg_loss = torch.zeros(1, device=device)[0]
 
-        mxr_loss = w_loss + img_loss + bg_loss + fg_loss + shp_loss
+        mxr_loss = w_loss + img_loss + bg_loss + fg_loss
         loss_dict["w"] = w_loss / args.w_mse
         loss_dict["img"] = img_loss / args.img_mse
         loss_dict["bg"] = bg_loss / args.bg_prsv
         loss_dict["fg"] = fg_loss / args.fg_prsv
-        loss_dict["shp"] = shp_loss / args.shp
 
         mixer.zero_grad()
         mxr_loss.backward()
@@ -323,12 +325,11 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
         bg_loss_val = loss_reduced["bg"].mean().item()
         fg_loss_val = loss_reduced["fg"].mean().item()
         rec_loss_val = loss_reduced["rec"].mean().item()
-        shp_loss_val = loss_reduced["shp"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}; bg: {bg_loss_val:.4f}; fg: {fg_loss_val:.4f}; rec: {rec_loss_val:.4f}; shp: {shp_loss_val:.4f}"
+                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}; bg: {bg_loss_val:.4f}; fg: {fg_loss_val:.4f}; rec: {rec_loss_val:.4f}"
                 )
             )
 
@@ -340,7 +341,6 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
                         "FG Preserve": fg_loss_val,
                         "Img MSE": img_loss_val,
                         "Rec W": rec_loss_val,
-                        "Shape": shp_loss_val,
                     }
                 )
 
@@ -515,9 +515,6 @@ if __name__ == "__main__":
         "--constrain_img", action="store_true", help="use img mse loss as well"
     )
     parser.add_argument(
-        "--constrain_shp", action="store_true", help="use mask mse loss as well"
-    )
-    parser.add_argument(
         "--preserve_bg", action="store_true", help="use try to preserve bg as well"
     )
     parser.add_argument(
@@ -536,7 +533,6 @@ if __name__ == "__main__":
     parser.add_argument("--bg_prsv", type=float, default=1e1, help="mse weight for bg")
     parser.add_argument("--fg_prsv", type=float, default=1e1, help="mse weight for img")
     parser.add_argument("--recw", type=float, default=1, help="reconstruct sample w")
-    parser.add_argument("--shp", type=float, default=5, help="shape constraint")
     # parser.add_argument("--clr", type=float, default=1, help="constrain on foreground color")
 
     args = parser.parse_args()
@@ -579,6 +575,7 @@ if __name__ == "__main__":
     args.b_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
+
 
     style_generator = Generator(
         size=args.size,
