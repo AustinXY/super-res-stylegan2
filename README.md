@@ -25,7 +25,7 @@ Image mixer: with background preservation<br><br>
 cdn 4_2<br>
 Image mixer: constrain on image<br><br>
 cdn 4_3<br>
-Image mixer: No mpnet; just require mix image to have same background as shape img and same mean color as color img?<br><br>
+Image mixer: concat bg to fg?<br><br>
 ___
 train<br>
 ragular mapping net<br><br>
