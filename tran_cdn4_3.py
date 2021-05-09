@@ -232,10 +232,6 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
         color_img, _ = style_generator([color_w], input_is_latent=True, randomize_noise=False)
         target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
 
-        if args.constrain_img:
-            img_loss = F.mse_loss(mix_img, target_img) * args.img_mse
-        else:
-            img_loss = torch.zeros(1, device=device)[0]
 
         if args.mxr_size < args.size:
             _shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
@@ -246,21 +242,21 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
         if args.mxr_size < args.size:
             _mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
-        if args.constrain_w:
-            w_loss = F.mse_loss(mix_w, target_w) * args.w_mse
-        else:
-            w_loss = torch.zeros(1, device=device)[0]
+        shape_mask = mknet(_shape_img)
+        mix_mask = mknet(_mix_img)
+        shape_mask = F.interpolate(shape_mask, size=(args.size, args.size), mode='area')
+        mix_mask = F.interpolate(mix_mask, size=(args.size, args.size), mode='area')
+        shape_mask = process_mask(shape_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+        mix_mask = process_mask(mix_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+
+        cat_img = target_img * shape_mask + shape_img * (torch.ones_like(shape_mask) - shape_mask)
+        img_loss = F.mse_loss(mix_img, cat_img) * args.img_mse
 
         if args.preserve_bg:
             # shape_img = shape_img[0:args.batch//2]
             # mix_w = mix_w[0:args.batch//2]
-            shape_mask = mknet(_shape_img)
-            mix_mask = mknet(_mix_img)
-            shape_mask = F.interpolate(shape_mask, size=(args.size, args.size), mode='area')
-            mix_mask = F.interpolate(mix_mask, size=(args.size, args.size), mode='area')
-            shape_mask = process_mask(shape_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-            mix_mask = process_mask(mix_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-
+            shape_mask = process_mask(mknet(shape_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
             shape_bg = shape_img * (torch.ones_like(shape_mask) - shape_mask)
             mix_bg = mix_img * (torch.ones_like(mix_mask) - mix_mask)
             bg_loss = F.mse_loss(mix_bg, shape_bg) * args.bg_prsv
@@ -269,17 +265,9 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim,
 
         if args.preserve_fg:
             if not args.preserve_bg:
-                mix_mask = mknet(_mix_img)
-                mix_mask = F.interpolate(mix_mask, size=(args.size, args.size), mode='area')
-                mix_mask = process_mask(mix_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+                mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
 
-            if args.mxr_size < args.size:
-                _target_img = F.interpolate(target_img, size=(args.mxr_size, args.mxr_size), mode='area')
-
-            target_mask = mknet(_target_img)
-            target_mask = F.interpolate(target_mask, size=(args.size, args.size), mode='area')
-            target_mask = process_mask(target_mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-
+            target_mask = process_mask(mknet(target_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
             target_fg = target_img * target_mask
             mix_fg = mix_img * mix_mask
             fg_loss = F.mse_loss(mix_fg, target_fg) * args.fg_prsv
