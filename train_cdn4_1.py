@@ -5,7 +5,7 @@ import os
 import copy
 import sys
 
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 from numpy.core.fromnumeric import resize
 import dnnlib
@@ -21,7 +21,7 @@ from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
 
-from model import Generator, G_NET, Encoder, ImgMixer
+from model import Generator, G_NET, Encoder, ImgMixer, UNet
 
 from finegan_config import finegan_config
 
@@ -153,8 +153,26 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
 
     return z, b, p, c
 
+def fill_mask(mask, pad_px=3):
+    kernel = torch.ones(1, 1, 2*pad_px+1, 2*pad_px+1, device=mask.device)
+    filled_mask = F.conv2d(mask, kernel, padding=pad_px)
+    return filled_mask
 
-def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device):
+def get_bin_mask(mask, thrsh=0.8):
+    bin_mask = torch.where(mask >= thrsh, torch.ones_like(mask), torch.zeros_like(mask))
+    return bin_mask
+
+def process_mask(mask, thrsh0=0.8, thrsh1=0.3, pad_px=3):
+    bin_mask = get_bin_mask(mask, thrsh=thrsh0)
+    if pad_px == 0:
+        return bin_mask
+
+    filled_mask = fill_mask(bin_mask, pad_px)
+    bin_mask = get_bin_mask(filled_mask, thrsh=thrsh1)
+    return bin_mask
+
+
+def train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim, device):
 
     pbar = range(args.iter)
 
@@ -166,11 +184,13 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
     if args.distributed:
         mp_module = mpnet.module
+        mk_module = mknet.module
         fine_g_module = fine_generator.module
         style_g_module = style_generator.module
         mxr_module = mixer.module
     else:
         mp_module = mpnet
+        mk_module = mknet
         fine_g_module = fine_generator
         style_g_module = style_generator
         mxr_module = mixer
@@ -181,6 +201,8 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
     style_generator.requires_grad_(False)
     mpnet.eval()
     mpnet.requires_grad_(False)
+    mknet.eval()
+    mknet.requires_grad_(False)
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -198,7 +220,7 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
         z1, b1, p1, c1 = rand_sample_codes(prev_z=z0, prev_b=b0, prev_p=p0, prev_c=c0, rand_code=['z', 'b', 'p', 'c'])
 
-        shape_img, shape_mask = fine_generator(z0, b0, p0, c0, rtn_mk=True)
+        shape_img, _ = fine_generator(z0, b0, p0, c0)
         color_img, _ = fine_generator(z1, b1, p1, c1)
         target_img, _ = fine_generator(z0, b0, p0, c1)
 
@@ -206,42 +228,71 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
         color_w = mpnet(color_img)
         target_w = mpnet(target_img)
 
-        # mutual_bg_mask = (torch.ones_like(shape_mask) - shape_mask) * (torch.ones_like(color_mask) - color_mask)
-
         shape_img, _ = style_generator([shape_w], input_is_latent=True, randomize_noise=False)
         color_img, _ = style_generator([color_w], input_is_latent=True, randomize_noise=False)
+        target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
+
+        if args.constrain_img:
+            img_loss = F.mse_loss(mix_img, target_img) * args.img_mse
+        else:
+            img_loss = torch.zeros(1, device=device)[0]
 
         if args.mxr_size < args.size:
             shape_img = F.interpolate(shape_img, size=(args.mxr_size, args.mxr_size), mode='area')
             color_img = F.interpolate(color_img, size=(args.mxr_size, args.mxr_size), mode='area')
+            target_img = F.interpolate(target_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
         mix_w = mixer(shape_img, color_img)
+        mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
+        if args.mxr_size < args.size:
+            mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
 
         if args.constrain_w:
             w_loss = F.mse_loss(mix_w, target_w) * args.w_mse
         else:
-            w_loss = torch.zeros(1, device=device)
+            w_loss = torch.zeros(1, device=device)[0]
 
-        if args.constrain_img:
-            target_img, _ = style_generator([target_w], input_is_latent=True, randomize_noise=False)
-            mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
-            img_loss = F.mse_loss(mix_img, target_img) * args.img_mse
+        if args.constrain_shp:
+            shape_mask = process_mask(mknet(shape_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            shp_loss = F.mse_loss(mix_mask, shape_mask) * args.shp
         else:
-            img_loss = torch.zeros(1, device=device)
+            shp_loss = torch.zeros(1, device=device)[0]
 
         if args.preserve_bg:
-            if not args.constrain_img:
-                mix_img, _ = style_generator([mix_w], input_is_latent=True, randomize_noise=False)
+            # shape_img = shape_img[0:args.batch//2]
+            # mix_w = mix_w[0:args.batch//2]
+            if not args.constrain_shp:
+                shape_mask = process_mask(mknet(shape_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+                mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
 
-            if args.mxr_size < args.size:
-                mix_img = F.interpolate(mix_img, size=(args.mxr_size, args.mxr_size), mode='area')
-
-            bg_mask = torch.ones_like(shape_mask) - shape_mask
-            shape_bg = shape_img * bg_mask
-            mix_bg = mix_img * bg_mask
-            bg_loss = F.mse_loss(mix_bg[0:args.batch//2], shape_bg[0:args.batch//2]) * args.bg_prsv
+            shape_bg = shape_img * (torch.ones_like(shape_mask) - shape_mask)
+            mix_bg = mix_img * (torch.ones_like(mix_mask) - mix_mask)
+            bg_loss = F.mse_loss(mix_bg, shape_bg) * args.bg_prsv
         else:
-            bg_loss = torch.zeros(1, device=device)
+            bg_loss = torch.zeros(1, device=device)[0]
+
+        if args.preserve_fg:
+            if not args.preserve_bg:
+                mix_mask = process_mask(mknet(mix_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+
+            target_mask = process_mask(mknet(target_img), args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+            target_fg = target_img * target_mask
+            mix_fg = mix_img * mix_mask
+            fg_loss = F.mse_loss(mix_fg, target_fg) * args.fg_prsv
+        else:
+            fg_loss = torch.zeros(1, device=device)[0]
+
+        mxr_loss = w_loss + img_loss + bg_loss + fg_loss + shp_loss
+        loss_dict["w"] = w_loss / args.w_mse
+        loss_dict["img"] = img_loss / args.img_mse
+        loss_dict["bg"] = bg_loss / args.bg_prsv
+        loss_dict["fg"] = fg_loss / args.fg_prsv
+        loss_dict["shp"] = shp_loss / args.shp
+
+        mixer.zero_grad()
+        mxr_loss.backward()
+        mxr_optim.step()
 
         if args.recon_sample:
             # reconstruct sampled images
@@ -253,32 +304,31 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
 
             rec_sample_w = mixer(sample_img, sample_img)
             rec_loss = F.mse_loss(rec_sample_w, sample_w) * args.recw
+            loss_dict["rec"] = rec_loss / args.recw
             # rec_sample_img, _ = style_generator([rec_sample_w], input_is_latent=True, randomize_noise=False)
             # rec_loss = F.mse_loss(rec_sample_img, sample_img) * args.img_mse
+
+            mixer.zero_grad()
+            rec_loss.backward()
+            mxr_optim.step()
+
         else:
-            rec_loss = torch.zeros(1, device=device)
+            loss_dict["rec"] = torch.zeros(1, device=device)[0]
 
-        mxr_loss = w_loss + img_loss + bg_loss + rec_loss
-        loss_dict["w"] = w_loss / args.w_mse
-        loss_dict["img"] = img_loss / args.img_mse
-        loss_dict["bg"] = bg_loss / args.bg_prsv
-        loss_dict["rec"] = rec_loss / args.recw
-
-        mixer.zero_grad()
-        mxr_loss.backward()
-        mxr_optim.step()
 
         ############# ############# #############
         loss_reduced = reduce_loss_dict(loss_dict)
         w_loss_val = loss_reduced["w"].mean().item()
         img_loss_val = loss_reduced["img"].mean().item()
         bg_loss_val = loss_reduced["bg"].mean().item()
+        fg_loss_val = loss_reduced["fg"].mean().item()
         rec_loss_val = loss_reduced["rec"].mean().item()
+        shp_loss_val = loss_reduced["shp"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}; bg: {bg_loss_val:.4f}; rec: {rec_loss_val:.4f}"
+                    f"w: {w_loss_val:.4f}; img: {img_loss_val:.4f}; bg: {bg_loss_val:.4f}; fg: {fg_loss_val:.4f}; rec: {rec_loss_val:.4f}; shp: {shp_loss_val:.4f}"
                 )
             )
 
@@ -287,8 +337,10 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                     {
                         "W MSE": w_loss_val,
                         "BG Preserve": bg_loss_val,
+                        "FG Preserve": fg_loss_val,
                         "Img MSE": img_loss_val,
                         "Rec W": rec_loss_val,
+                        "Shape": shp_loss_val,
                     }
                 )
 
@@ -398,12 +450,13 @@ def train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device
                         "style_g": style_g_module.state_dict(),
                         "fine": fine_g_module.state_dict(),
                         "mp": mp_module.state_dict(),
+                        "mk": mk_module.state_dict(),
                         "mxr": mxr_module.state_dict(),
                         "mxr_optim": mxr_optim.state_dict(),
                         "args": args,
                         "cur_iter": i,
                     },
-                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}_4.pt",
+                    f"cdn_training_dir/checkpoint/{str(i).zfill(6)}_4_1.pt",
                 )
 
 
@@ -462,16 +515,29 @@ if __name__ == "__main__":
         "--constrain_img", action="store_true", help="use img mse loss as well"
     )
     parser.add_argument(
+        "--constrain_shp", action="store_true", help="use mask mse loss as well"
+    )
+    parser.add_argument(
         "--preserve_bg", action="store_true", help="use try to preserve bg as well"
+    )
+    parser.add_argument(
+        "--preserve_fg", action="store_true", help="use try to preserve bg as well"
     )
     parser.add_argument(
         "--recon_sample", action="store_true", help="reconstruct sample as well"
     )
 
-    parser.add_argument("--w_mse", type=float, default=1e1, help="mse weight for w")
+    parser.add_argument("--mk_thrsh0", type=float, default=0.4, help="Threshold for mask")
+    parser.add_argument("--mk_thrsh1", type=float, default=0.2, help="Threshold for mask")
+    parser.add_argument("--mk_pdpx", type=int, default=3, help="Threshold for mask")
+
+    parser.add_argument("--w_mse", type=float, default=5, help="mse weight for w")
     parser.add_argument("--img_mse", type=float, default=1e1, help="mse weight for img")
-    parser.add_argument("--bg_prsv", type=float, default=1e-2, help="mse weight for img")
+    parser.add_argument("--bg_prsv", type=float, default=1e1, help="mse weight for bg")
+    parser.add_argument("--fg_prsv", type=float, default=1e1, help="mse weight for img")
     parser.add_argument("--recw", type=float, default=1, help="reconstruct sample w")
+    parser.add_argument("--shp", type=float, default=5, help="shape constraint")
+    # parser.add_argument("--clr", type=float, default=1, help="constrain on foreground color")
 
     args = parser.parse_args()
 
@@ -491,13 +557,15 @@ if __name__ == "__main__":
     if args.mp_ckpt is not None:
         ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
         mp_args = ckpt['args']
-    elif args.ckpt is not None:
+    if args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
-        mp_args = ckpt['args']
         args.start_iter = ckpt['cur_iter']
+        if args.mp_ckpt is None:
+            mp_args = ckpt['args']
     else:
-        print('need to at least load one of mp_ckpt or ckpt')
-        sys.exit(0)
+        if args.mp_ckpt is None:
+            print('need to at least load one of mp_ckpt or ckpt')
+            sys.exit(0)
 
     args.ds_name = mp_args.ds_name
     args.size = mp_args.size
@@ -511,7 +579,6 @@ if __name__ == "__main__":
     args.b_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
-
 
     style_generator = Generator(
         size=args.size,
@@ -541,6 +608,12 @@ if __name__ == "__main__":
         w_dim=args.latent
     ).to(device)
 
+    mknet = UNet(
+        n_channels = 3,
+        n_classes = 1,
+        bilinear = True,
+    ).to(device)
+
     mxr_optim = optim.Adam(
         mixer.parameters(),
         lr=args.lr,
@@ -550,12 +623,13 @@ if __name__ == "__main__":
     if args.ckpt is not None:
         print("loading checkpoint:", args.ckpt)
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
-        mixer.load_state_dict(ckpt["mxr"])
-        mxr_optim.load_state_dict(ckpt["mxr_optim"])
+        mixer.load_state_dict(ckpt["mxr"], strict=False)
 
         if args.mp_ckpt is None:
             mpnet.load_state_dict(ckpt["mp"])
+            mknet.load_state_dict(ckpt["mk"])
             style_generator.load_state_dict(ckpt["style_g"])
+            mxr_optim.load_state_dict(ckpt["mxr_optim"])
 
         if args.fine_ckpt is None:
             fine_generator.load_state_dict(ckpt["fine"])
@@ -564,8 +638,9 @@ if __name__ == "__main__":
         print("load mapping model:", args.mp_ckpt)
         mp_ckpt = torch.load(args.mp_ckpt, map_location=lambda storage, loc: storage)
         mpnet.load_state_dict(mp_ckpt["mp"])
+        mknet.load_state_dict(mp_ckpt["mk"])
         style_generator.load_state_dict(mp_ckpt["style_g"])
-        # fine_generator.load_state_dict(mp_ckpt["fine"])
+        fine_generator.load_state_dict(mp_ckpt["fine"])
 
     if args.fine_ckpt is not None:
         print("load fine model:", args.fine_ckpt)
@@ -573,29 +648,42 @@ if __name__ == "__main__":
         fine_generator.load_state_dict(fine_ckpt)
 
     if args.distributed:
-        sys.exit()
-        # style_generator = nn.parallel.DistributedDataParallel(
-        #     style_generator,
-        #     device_ids=[args.local_rank],
-        #     output_device=args.local_rank,
-        #     broadcast_buffers=False,
-        # )
+        style_generator = nn.parallel.DistributedDataParallel(
+            style_generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
 
-        # fine_generator = nn.parallel.DistributedDataParallel(
-        #     fine_generator,
-        #     device_ids=[args.local_rank],
-        #     output_device=args.local_rank,
-        #     broadcast_buffers=False,
-        # )
+        fine_generator = nn.parallel.DistributedDataParallel(
+            fine_generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
 
-        # mpnet = nn.parallel.DistributedDataParallel(
-        #     mpnet,
-        #     device_ids=[args.local_rank],
-        #     output_device=args.local_rank,
-        #     broadcast_buffers=False,
-        # )
+        mpnet = nn.parallel.DistributedDataParallel(
+            mpnet,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
+        mknet = nn.parallel.DistributedDataParallel(
+            mknet,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
+        mixer = nn.parallel.DistributedDataParallel(
+            mixer,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="image mixer net")
 
-    train(args, fine_generator, style_generator, mpnet, mixer, mxr_optim, device)
+    train(args, fine_generator, style_generator, mpnet, mknet, mixer, mxr_optim, device)

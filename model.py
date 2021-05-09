@@ -505,23 +505,6 @@ class Generator(nn.Module):
     def get_latent(self, input):
         return self.style(input)
 
-    def get_mixed_latent(self, styles, inject_index):
-        styles = [self.style(s) for s in styles]
-        if len(styles) < 2:
-            inject_index = self.n_latent
-            if styles[0].ndim < 3:
-                latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            else:
-                latent = styles[0]
-        else:
-            if inject_index is None:
-                inject_index = random.randint(1, self.n_latent - 1)
-            latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            latent2 = styles[1].unsqueeze(1).repeat(
-                1, self.n_latent - inject_index, 1)
-            latent = torch.cat([latent, latent2], 1)
-        return latent
-
     def forward(
         self,
         styles,
@@ -1364,74 +1347,6 @@ class ImplicitMixer2(nn.Module):
         return w.view(batch, self.num_ws, self.w_dim)
 
 
-class CntMat(nn.Module):
-    def __init__(self, num_ws, w_dim):
-        super().__init__()
-        self.num_ws = num_ws
-        self.w_dim = w_dim
-        full_dim = num_ws * w_dim
-        self.full_dim = full_dim
-
-        self.fc = nn.Sequential(
-            LinearModule(full_dim, full_dim),
-            # LinearModule(full_dim, full_dim),
-            # LinearModule(full_dim, full_dim),
-            LinearModule(full_dim, full_dim),
-            LinearModule(full_dim, full_dim, activation=False, normalize=False),
-        )
-
-    def forward(self, w):
-        batch = w.size(0)
-        w = self.fc(w.view(batch, self.full_dim))
-        return torch.sigmoid(w.view(batch, self.num_ws, self.w_dim))
-
-
-class ImgCntMat(nn.Module):
-    def __init__(self, size, num_ws, img_channels=3, w_dim=512):
-        super().__init__()
-        channels = {
-            4: 512,
-            8: 512,
-            16: 512,
-            32: 512,
-            64: 256,
-            128: 128,
-            256: 64,
-            512: 32,
-            1024: 16
-        }
-
-        self.w_dim = w_dim
-        self.n_latents = num_ws
-
-        log_size = int(math.log(size, 2))
-        convs = [ConvLayer(img_channels, channels[size], 1)]
-
-        in_channel = channels[size]
-        for i in range(log_size, 2, -1):
-            out_channel = channels[2 ** (i - 1)]
-            convs.append(_ResBlock(in_channel, out_channel))
-            in_channel = out_channel
-        self.convs = nn.Sequential(*convs)
-
-        # convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
-
-        self.final_linear = nn.Sequential(
-            # EqualLinear(channels[4] * 4 * 4, channels[4]
-            #             * 4 * 4, activation="fused_lrelu"),
-            EqualLinear(channels[4] * 4 * 4, w_dim *
-                        num_ws, activation="fused_lrelu"),
-            EqualLinear(w_dim * num_ws, w_dim * num_ws),
-        )
-
-    def forward(self, img):
-        batch = img.size(0)
-        x = self.convs(img)
-        x = self.final_linear(x.view(batch, -1))
-
-        return torch.sigmoid(x.view(batch, self.n_latents, self.w_dim))
-
-
 class ImgMixer(nn.Module):
     def __init__(self, size, num_ws, img_channels=3, w_dim=512):
         super().__init__()
@@ -1468,8 +1383,8 @@ class ImgMixer(nn.Module):
 
         self.final_linear = nn.Sequential(
             EqualLinear(channels[4] * 4 * 4 * 2, channels[4] * 4 * 4, activation="fused_lrelu"),
-            EqualLinear(channels[4] * 4 * 4, w_dim * num_ws, activation="fused_lrelu"),
-            EqualLinear(w_dim * num_ws, w_dim * num_ws),
+            EqualLinear(channels[4] * 4 * 4, w_dim * num_ws),
+            # EqualLinear(w_dim * num_ws, w_dim * num_ws),
         )
 
     def forward(self, img0, img1):
