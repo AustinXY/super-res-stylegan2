@@ -1581,4 +1581,4 @@ class G_NET(nn.Module):
         elif rtn_type == 'cmsk':
             rtn = fg_masked3
 
-        return rtn, None
+        return rtn
