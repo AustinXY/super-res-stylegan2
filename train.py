@@ -698,6 +698,13 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
+        fine_generator = nn.parallel.DistributedDataParallel(
+            fine_generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
     transform = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(),
