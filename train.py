@@ -469,7 +469,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 50000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
