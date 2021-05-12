@@ -481,7 +481,7 @@ class Generator(nn.Module):
             skip = to_rgb(out, latent[:, i + 2], skip)
             i += 2
 
-        image = F.tanh(skip)
+        image = torch.tanh(skip)
 
         output = { 'image': image }
         if return_latents:

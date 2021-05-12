@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
 import torch
@@ -28,6 +28,7 @@ from distributed import (
 
 from scene_model import Generator, Discriminator
 from model import G_NET
+from criteria.vgg import VGGLoss
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -469,7 +470,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 50000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
