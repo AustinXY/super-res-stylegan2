@@ -12,10 +12,10 @@ from tqdm import tqdm
 import math
 import lpips
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
-from model import Generator, Discriminator, MappingNetwork, Encoder
 # from finegan_config import finegan_config
+from scene_model import _Generator, Discriminator
 
 
 def noise_regularize(noises):
@@ -114,7 +114,6 @@ if __name__ == "__main__":
         "--batch", type=int, default=16, help="batch sizes for each gpus")
 
     args = parser.parse_args()
-
     resize = 128
 
     transform = transforms.Compose(
@@ -145,44 +144,23 @@ if __name__ == "__main__":
     print("load model:", args.ckpt)
     ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
     train_args = ckpt['args']
+    train_args.size=512
 
-    style_generator = Generator(
-        size=train_args.size,
-        style_dim=train_args.latent,
-        n_mlp=train_args.n_mlp,
-        channel_multiplier=train_args.channel_multiplier
-    ).to(device)
+    style_generator = _Generator(train_args, device).to(device)
 
     # style_discriminator = Discriminator(
     #     size=train_args.size
     # ).to(device)
 
-    if train_args.mp_arch == 'vanilla':
-        mpnet = MappingNetwork(
-            num_ws=style_generator.n_latent,
-            w_dim=train_args.latent
-        ).to(device)
-    # https://github.com/bryandlee/stylegan2-encoder-pytorch
-    elif train_args.mp_arch == 'encoder':
-        mpnet = Encoder(
-            size=128,
-            num_ws=style_generator.n_latent,
-            w_dim=train_args.latent
-        ).to(device)
-
-    style_generator.load_state_dict(ckpt["style_g"])
+    style_generator.load_state_dict(ckpt["g_ema"])
     # style_discriminator.load_state_dict(ckpt["style_d"])
-    mpnet.load_state_dict(ckpt["mp"])
 
     style_generator.eval()
     # style_discriminator.eval()
-    mpnet.eval()
 
     with torch.no_grad():
-        wp_code = mpnet(imgs)
-        style_img, _ = style_generator([wp_code],
-            input_is_latent=True,
-            randomize_noise=False)
+        output = style_generator(imgs, return_loss=False)
+        style_img = output['image']
 
         # print(style_discriminator(style_img))
 
