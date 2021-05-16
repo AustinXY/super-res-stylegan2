@@ -239,6 +239,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
     fine_generator.eval()
     fine_generator.requires_grad_(False)
 
+    vgg_loss = VGGLoss()
     for idx in pbar:
         i = idx + args.start_iter
 
@@ -383,7 +384,8 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
             fake_img = output['image']
 
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
-            rec_loss = F.mse_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
+            # rec_loss = F.mse_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
+            rec_loss = vgg_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
 
             generator.zero_grad()
             rec_loss.backward()
@@ -470,7 +472,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
                             }
                         )
 
-            if i % 50000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
