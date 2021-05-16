@@ -8,7 +8,7 @@ from torch import nn, autograd, optim
 from torch.nn import functional as F
 from torchvision import transforms, utils
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
 from model import G_NET
 from finegan_config import finegan_config
@@ -91,7 +91,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="sample fine img")
     parser.add_argument(
-        "--fine_model",
+        "--ckpt",
         type=str,
         default=None,
         help="path to finegan",
@@ -110,7 +110,7 @@ if __name__ == "__main__":
         "--n_sample", type=int, default=8, help="number of sample for each batch item"
     )
     parser.add_argument(
-        "--ds_name", type=str, default='CUB', help="name of dataset"
+        "--ds_name", type=str, default='STANFORDCAR', help="name of dataset"
     )
     parser.add_argument(
         "--rtn_img", type=str, default='fnl', help="return image type"
@@ -126,12 +126,13 @@ if __name__ == "__main__":
     # fine_generator = torch.nn.DataParallel(fine_generator)
     # print(fine_generator)
 
-    assert args.fine_model is not None
-    print("load fine model:", args.fine_model)
+    assert args.ckpt is not None
+    print("load fine model:", args.ckpt)
 
-    fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
+    fine_dict = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
     fine_generator.load_state_dict(fine_dict)
 
+    print(args.rand_code)
 
     #########
     fine_generator.eval()
@@ -141,10 +142,10 @@ if __name__ == "__main__":
                                 args.b_dim, args.p_dim, args.c_dim, device)
         for i in range(args.n_sample):
             # p = manual_sample_codes(p, [i+10])
-            fine_img = fine_generator(z, b, p, c, z_fg=z_fg, rtn_img=args.rtn_img)
+            fine_img = fine_generator(z, b, p, c, z_fg=z_fg)
             # fine_img = fine_generator(z, b, p, c, rtn_img='pmk')
             img_li.append(fine_img)
-            z_fg, b, p, c = rand_sample_codes(z, b, p, c, rand_code=args.rand_code)
+            z_fg, b, p, c = rand_sample_codes(z_fg, b, p, c, rand_code=args.rand_code)
 
         fnl_img = None
 

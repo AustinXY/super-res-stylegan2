@@ -4,6 +4,8 @@ import random
 import os
 import copy
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 from numpy.core.fromnumeric import resize
 import dnnlib
 
@@ -15,14 +17,8 @@ from torch.utils import data
 import torch.distributed as dist
 from torchvision import transforms, utils
 from tqdm import tqdm
-from torch_utils import image_transforms
 
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
-
-from model import Generator, MappingNetwork, G_NET
-from finegan_config import finegan_config
-
-from dataset import MultiResolutionDataset
+from model import Generator
 
 from distributed import (
     get_rank,
@@ -31,6 +27,23 @@ from distributed import (
     reduce_sum,
     get_world_size,
 )
+
+
+def make_noise(batch, latent_dim, n_noise, device):
+    if n_noise == 1:
+        return torch.randn(batch, latent_dim, device=device)
+
+    noises = torch.randn(n_noise, batch, latent_dim, device=device).unbind(0)
+
+    return noises
+
+
+def mixing_noise(batch, latent_dim, prob, device):
+    if prob > 0 and random.random() < prob:
+        return make_noise(batch, latent_dim, 2, device)
+
+    else:
+        return [make_noise(batch, latent_dim, 1, device)]
 
 
 if __name__ == "__main__":
@@ -52,13 +65,13 @@ if __name__ == "__main__":
         help="number of the samples generated during training",
     )
     parser.add_argument(
-        "--size", type=int, default=256, help="image sizes for the model"
+        "--size", type=int, default=512, help="image sizes for the model"
     )
     parser.add_argument(
         "--mixing", type=float, default=0.9, help="probability of latent code mixing"
     )
     parser.add_argument(
-        "--style_model",
+        "--ckpt",
         type=str,
         default=None,
         help="path to stylegan",
@@ -103,25 +116,34 @@ if __name__ == "__main__":
         args.size
     ).to(device)
 
-    assert args.style_model is not None
-    print("load style model:", args.style_model)
+    assert args.ckpt is not None
+    print("load style model:", args.ckpt)
 
-    style_dict = torch.load(args.style_model, map_location=lambda storage, loc: storage)
+    style_dict = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
     style_generator.load_state_dict(style_dict["g_ema"], strict=False)
     style_generator.eval()
     discriminator.load_state_dict(style_dict["d"], strict=False)
     discriminator.eval()
 
     with torch.no_grad():
-        sample_z = torch.randn(args.batch, args.latent, device=device)
-        sample_img, _ = style_generator([sample_z])
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        sample_img, _ = style_generator(noise)
         print(discriminator(sample_img))
 
+    for i in range(args.batch):
+        img = sample_img[i:i+1]
+        utils.save_image(
+            F.interpolate(img, size=(128, 128), mode='area'),
+            f"style_sample/style{i}.png",
+            nrow=8,
+            normalize=True,
+            range=(-1, 1),
+        )
+
     utils.save_image(
-        sample_img,
-        f"style_sample.png",
+        F.interpolate(sample_img, size=(128, 128), mode='area'),
+        f"style_sample/style.png",
         nrow=8,
         normalize=True,
         range=(-1, 1),
     )
-

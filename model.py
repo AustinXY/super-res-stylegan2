@@ -414,7 +414,7 @@ class Generator(nn.Module):
 
         layers = [PixelNorm()]
 
-        for i in range(n_mlp):
+        for _ in range(n_mlp):
             layers.append(
                 EqualLinear(
                     style_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
@@ -1119,9 +1119,15 @@ class Encoder(nn.Module):
 
         self.convs = nn.Sequential(*convs)
 
-    def forward(self, input):
+    def forward(self, input, return_li=True):
+        batch = input.size(0)
         out = self.convs(input)
-        return out.view(len(input), self.n_latents, self.w_dim)
+        if self.n_latents > 1:
+            if return_li:
+                return out.view(self.n_latents, batch, self.w_dim).unbind(0)
+            return out.view(batch, self.n_latents, self.w_dim)
+        else:
+            return out.view(batch, self.w_dim)
 
 
 class LinearModule(nn.Module):
