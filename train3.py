@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
 import torch
@@ -264,7 +264,14 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         fine_img = fine_generator(z, b, p, c)
 
-        style_z, _ = mpnet(fine_img)
+        from_fine_z = i % args.from_img_every == 0
+        from_fine_z = True
+        # args.injidx = None
+        if from_fine_z:
+            style_z, _ = mpnet(fine_img)
+        else:
+            style_z = mixing_noise(args.batch, args.latent, args.mixing, device)
+
         fake_img, _ = generator(style_z, inject_index=args.injidx, randomize_noise=False)
 
         if args.augment:
@@ -322,7 +329,11 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         # fine_img = fine_generator(z, b, p, c)
 
-        style_z, _ = mpnet(fine_img)
+        if from_fine_z:
+            style_z, kl_loss = mpnet(fine_img, return_kl=True)
+        else:
+            style_z = mixing_noise(args.batch, args.latent, args.mixing, device)
+
         fake_img, _ = generator(style_z, inject_index=args.injidx, randomize_noise=False)
 
         if args.augment:
@@ -331,10 +342,14 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         fake_pred = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
+        loss = g_loss
+        if from_fine_z:
+            loss += kl_loss
+
         loss_dict["g"] = g_loss
 
         generator.zero_grad()
-        g_loss.backward()
+        loss.backward()
         g_optim.step()
 
         g_regularize = i % args.g_reg_every == 0
@@ -342,14 +357,17 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         if g_regularize:
             path_batch_size = max(1, args.batch // args.path_batch_shrink)
 
-            z, b, p, c = sample_codes(path_batch_size, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-            if not args.tie_code:
-                z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+            if from_fine_z:
+                z, b, p, c = sample_codes(path_batch_size, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                if not args.tie_code:
+                    z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-            _fine_img = fine_generator(z, b, p, c)
+                _fine_img = fine_generator(z, b, p, c)
+                style_z, _ = mpnet(_fine_img)
+            else:
+                style_z = mixing_noise(path_batch_size, args.latent, args.mixing, device)
 
-            style_z = mpnet(_fine_img)
-            fake_img, latents = generator(style_z, inject_index=args.injidx, randomize_noise=False, return_latents=True)
+            fake_img, latents = generator(style_z, inject_index=args.injidx, return_latents=True)
 
             path_loss, mean_path_length, path_lengths = g_path_regularize(
                 fake_img, latents, mean_path_length
@@ -372,24 +390,27 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-        if i % args.mse_reg_every == 0:
+        mse_regularize = i % args.mse_reg_every == 0
+        # mse_regularize = False
+        if mse_regularize:
             # z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
             # if not args.tie_code:
             #     z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
             # fine_img = fine_generator(z, b, p, c)
 
-            style_z = mpnet(fine_img)
+            style_z, _ = mpnet(fine_img)
             fake_img, _ = generator(style_z, inject_index=args.injidx, randomize_noise=False)
 
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
-            rec_loss = F.mse_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
+            rec_loss = F.mse_loss(fake_img, fine_img) * args.mse
 
             generator.zero_grad()
             rec_loss.backward()
             g_optim.step()
 
-        loss_dict["rec"] = rec_loss / args.mse_reg_every / args.mse
+        # loss_dict["rec"] = torch.zeros(1, device=device)
+        loss_dict["rec"] = rec_loss / args.mse
 
         accumulate(g_ema, g_module, accum)
 
@@ -434,6 +455,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
+                    mpnet.eval()
 
                     z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     if not args.tie_code:
@@ -441,8 +463,11 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
                     fine_img = fine_generator(z, b, p, c)
 
-                    style_z = mpnet(fine_img)
+                    style_z, _ = mpnet(fine_img)
                     style_img, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
+
+                    style_z = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img1, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
 
                     utils.save_image(
                         fine_img,
@@ -460,11 +485,20 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        style_img1,
+                        f"sample/{str(i).zfill(6)}_2.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
                     if wandb and args.wandb:
                         wandb.log(
                             {
                                 "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                                 "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
 
@@ -481,7 +515,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                     },
-                    f"checkpoint/{str(i).zfill(6)}.pt",
+                    f"checkpoint/{str(i).zfill(6)}_{args.n_noise}.pt",
                 )
 
 
@@ -506,6 +540,7 @@ if __name__ == "__main__":
         help="number of the samples generated during training",
     )
 
+    parser.add_argument("--n_noise", type=int, default=1)
     parser.add_argument("--injidx", type=int, default=10)
     parser.add_argument("--style_dim", type=int, default=512)
     parser.add_argument("--size", type=int, default=512)
@@ -546,7 +581,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mse_reg_every",
         type=int,
-        default=4,
+        default=10,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
@@ -605,7 +640,12 @@ if __name__ == "__main__":
         default=256,
         help="probability update interval of the adaptive augmentation",
     )
-
+    parser.add_argument(
+        "--from_img_every",
+        type=int,
+        default=10,
+        help="probability update interval of the adaptive augmentation",
+    )
     parser.add_argument(
         "--tie_code", action="store_true", help="use tied codes"
     )
@@ -613,7 +653,7 @@ if __name__ == "__main__":
                         help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
 
     parser.add_argument("--kl_lambda", type=float, default=0.01)
-    parser.add_argument("--mse", type=float, default=1, help="mse weight")
+    parser.add_argument("--mse", type=float, default=4, help="mse weight")
 
     args = parser.parse_args()
 
@@ -662,7 +702,7 @@ if __name__ == "__main__":
 
     mpnet = Encoder_rep(
         size=128,
-        num_ws=2,
+        num_ws=args.n_noise,
         w_dim=args.latent
     ).to(device)
 
@@ -735,6 +775,13 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
+        mpnet = nn.parallel.DistributedDataParallel(
+            mpnet,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
         fine_generator = nn.parallel.DistributedDataParallel(
             fine_generator,
             device_ids=[args.local_rank],
@@ -762,6 +809,6 @@ if __name__ == "__main__":
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="super res")
-    torch.autograd.set_detect_anomaly(True)
+
     train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
           g_optim, d_optim, mk_optim, g_ema, device)

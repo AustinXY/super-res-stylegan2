@@ -1624,16 +1624,17 @@ class Encoder_rep(nn.Module):
             convs.append(_ResBlock(in_channel, out_channel))
             in_channel = out_channel
 
+        self.convs = nn.Sequential(*convs)
+
         # convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
         self.final_linear = EqualLinear(
-            channels[4] * 4 * 4 * self.n_latents,
+            channels[4] * 4 * 4,
             channels[4] * self.n_latents, activation='fused_lrelu')
         self.mu_linear = EqualLinear(
             channels[4] * self.n_latents, self.w_dim * self.n_latents)
         self.var_linear = EqualLinear(
             channels[4] * self.n_latents, self.w_dim * self.n_latents)
 
-        self.convs = nn.Sequential(*convs)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
