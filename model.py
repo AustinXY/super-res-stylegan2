@@ -1588,3 +1588,71 @@ class G_NET(nn.Module):
             rtn = fg_masked3
 
         return rtn
+
+
+class Encoder_rep(nn.Module):
+    def __init__(self, size, num_ws, img_channels=3, w_dim=512):
+        super().__init__()
+
+        channels = {
+            4: 512,
+            8: 512,
+            16: 512,
+            32: 512,
+            64: 256,
+            128: 128,
+            256: 64,
+            512: 32,
+            1024: 16
+        }
+
+        self.w_dim = w_dim
+        self.n_latents = num_ws
+
+        log_size = int(math.log(size, 2))
+        convs = [ConvLayer(img_channels, channels[size], 1)]
+
+        in_channel = channels[size]
+        for i in range(log_size, 2, -1):
+            out_channel = channels[2 ** (i - 1)]
+            convs.append(_ResBlock(in_channel, out_channel))
+            in_channel = out_channel
+
+        # convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
+        self.final_linear = EqualLinear(
+            channels[4] * 4 * 4 * self.n_latents,
+            channels[4] * self.n_latents, activation='fused_lrelu')
+        self.mu_linear = EqualLinear(
+            channels[4] * self.n_latents, self.w_dim * self.n_latents)
+        self.var_linear = EqualLinear(
+            channels[4] * self.n_latents, self.w_dim * self.n_latents)
+
+        self.convs = nn.Sequential(*convs)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return eps.mul(std) + mu
+
+    def get_kl_loss(self, mu, logvar):
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+    def forward(self, input, return_li=True, return_kl=False):
+        batch = input.size(0)
+        out = self.convs(input)
+        out = self.final_linear(out.view(batch, -1))
+        mu = self.mu_linear(out)
+        logvar = self.var_linear(out)
+        z = self.reparameterize(mu, logvar)
+
+        if return_kl:
+            loss = self.get_kl_loss(mu, logvar)
+        else:
+            loss = None
+
+        if self.n_latents > 1:
+            if return_li:
+                return z.view(self.n_latents, batch, self.w_dim).unbind(0), loss
+            return out.view(batch, self.n_latents, self.w_dim), loss
+        else:
+            return out.view(batch, self.w_dim), loss

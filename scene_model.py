@@ -992,5 +992,7 @@ class _Encoder(nn.Module):
         logvar = self.var_linear(out)
         z = self.reparameterize(mu, logvar)
 
+        print(z)
+        sys.exit()
         loss = self.get_kl_loss(mu, logvar)
         return starting_feature, z, loss
