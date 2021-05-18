@@ -1119,14 +1119,20 @@ class Encoder(nn.Module):
 
         self.convs = nn.Sequential(*convs)
 
-    def forward(self, input, return_li=True):
+    def forward(self, input, return_li=True, use_sigmoid=False):
         batch = input.size(0)
         out = self.convs(input)
+
+        if use_sigmoid:
+            out = torch.sigmoid(out)
+
         if self.n_latents > 1:
             if return_li:
                 return out.view(self.n_latents, batch, self.w_dim).unbind(0)
             return out.view(batch, self.n_latents, self.w_dim)
         else:
+            if return_li:
+                return [out.view(batch, self.w_dim)]
             return out.view(batch, self.w_dim)
 
 
