@@ -27,7 +27,7 @@ from distributed import (
 )
 
 # from scene_model import Discriminator
-from model import G_NET, UNet, Generator, Discriminator, Encoder_rep
+from model import G_NET, UNet, Generator, Discriminator, Encoder
 from criteria.vgg import VGGLoss
 
 from op import conv2d_gradfix
@@ -201,6 +201,10 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 
+def binarization_loss(mask):
+    return torch.min(1-mask, mask).mean()
+
+
 def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, g_optim, d_optim, mk_optim, g_ema, device):
     loader = sample_data(loader)
 
@@ -225,11 +229,13 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         d_module = discriminator.module
         fine_module = fine_generator.module
         mp_module = mpnet.module
+        mk_module = mknet.module
     else:
         g_module = generator
         d_module = discriminator
         fine_module = fine_generator
         mp_module = mpnet
+        mk_module = mknet
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -252,8 +258,34 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         real_img = next(loader)
         real_img = real_img.to(device)
         mpnet.train()
+        mknet.train()
+
+        ############# train mk network #############
+        requires_grad(mknet, True)
+        requires_grad(mpnet, False)
+        requires_grad(generator, False)
+        requires_grad(discriminator, False)
+
+        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if not args.tie_code:
+            z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+
+        fine_img, mask = fine_generator(z, b, p, c, rtn_mk=True)
+        pred_mask = mknet(fine_img)
+
+        bin_loss = binarization_loss(pred_mask) * args.bin
+        mk_loss = F.mse_loss(pred_mask, mask) * args.mk
+
+        mknet_loss = mk_loss + bin_loss
+        loss_dict["mk"] = mk_loss / args.mk
+        loss_dict["bin"] = bin_loss / args.bin
+
+        mknet.zero_grad()
+        mknet_loss.backward()
+        mk_optim.step()
 
         ############# train discriminator network #############
+        requires_grad(mknet, False)
         requires_grad(mpnet, False)
         requires_grad(generator, False)
         requires_grad(discriminator, True)
@@ -264,7 +296,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         fine_img = fine_generator(z, b, p, c)
 
-        style_z, _ = mpnet(fine_img)
+        style_z = mpnet(fine_img)
         fake_img, _ = generator(style_z, inject_index=args.injidx, randomize_noise=False)
 
         if args.augment:
@@ -312,6 +344,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         loss_dict["r1"] = r1_loss
 
         ############# train generator network #############
+        requires_grad(mknet, False)
         requires_grad(mpnet, True)
         requires_grad(generator, True)
         requires_grad(discriminator, False)
@@ -322,7 +355,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         # fine_img = fine_generator(z, b, p, c)
 
-        style_z, _ = mpnet(fine_img)
+        style_z = mpnet(fine_img)
         fake_img, _ = generator(style_z, inject_index=args.injidx, randomize_noise=False)
 
         if args.augment:
@@ -434,6 +467,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
+                    mpnet.eval()
 
                     z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     if not args.tie_code:
@@ -660,25 +694,23 @@ if __name__ == "__main__":
 
     fine_generator = G_NET(ds_name=args.ds_name).to(device)
 
-    mpnet = Encoder_rep(
+    mpnet = Encoder(
         size=128,
         num_ws=2,
         w_dim=args.latent
     ).to(device)
 
-    # mknet = UNet(
-    #     n_channels=3,
-    #     n_classes=1,
-    #     bilinear=True,
-    # ).to(device)
-    mknet = None
+    mknet = UNet(
+        n_channels=3,
+        n_classes=1,
+        bilinear=True,
+    ).to(device)
 
-    # mk_optim = optim.Adam(
-    #     mknet.parameters(),
-    #     lr=args.lr,
-    #     betas=(0, 0.99),
-    # )
-    mk_optim = None
+    mk_optim = optim.Adam(
+        mknet.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
 
     g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
@@ -762,6 +794,5 @@ if __name__ == "__main__":
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="super res")
-    torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
           g_optim, d_optim, mk_optim, g_ema, device)
