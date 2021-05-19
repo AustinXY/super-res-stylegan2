@@ -331,8 +331,16 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         if from_fine_z:
             style_z = mpnet(fine_img)
+            temp_z = torch.cat(style_z)
+            z_var = torch.var(temp_z)
+            z_mean = torch.mean(temp_z)
+            var_loss = torch.abs(1 - z_var) * 0.01
+            mean_loss = torch.abs(0 - z_mean) * 0.01
+
         else:
             style_z = mixing_noise(args.batch, args.latent, args.mixing, device)
+            var_loss = torch.zeros(1, device=device)[0]
+            mean_loss = torch.zeros(1, device=device)[0]
 
         fake_img, _ = generator(style_z, inject_index=args.injidx, randomize_noise=False)
 
@@ -342,10 +350,14 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         fake_pred = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
+        loss = g_loss + var_loss + mean_loss
+
         loss_dict["g"] = g_loss
+        loss_dict["var"] = var_loss
+        loss_dict["mean"] = mean_loss
 
         generator.zero_grad()
-        g_loss.backward()
+        loss.backward()
         g_optim.step()
 
         g_regularize = i % args.g_reg_every == 0
@@ -405,8 +417,10 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             rec_loss.backward()
             g_optim.step()
 
-        # loss_dict["rec"] = torch.zeros(1, device=device)
-        loss_dict["rec"] = rec_loss / args.mse
+        try:
+            loss_dict["rec"] = rec_loss / args.mse
+        except:
+            loss_dict["rec"] = torch.zeros(1, device=device)[0]
 
         accumulate(g_ema, g_module, accum)
 
@@ -420,13 +434,15 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         rec_loss_val = loss_reduced["rec"].item()
+        var_loss_val = loss_reduced["var"].item()
+        mean_loss_val = loss_reduced["mean"].item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
                     f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                     f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
-                    f"rec: {rec_loss_val:.4f}; "
+                    f"rec: {rec_loss_val:.4f}; var: {var_loss_val:.4f}; mean: {mean_loss_val:.4f};"
                     f"augment: {ada_aug_p:.4f}"
                 )
             )
@@ -445,6 +461,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "Recon": rec_loss_val,
+                        "Variance": var_loss_val,
+                        "Mean": mean_loss_val,
                     }
                 )
 
@@ -577,7 +595,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mse_reg_every",
         type=int,
-        default=10,
+        default=4,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
@@ -639,7 +657,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--from_img_every",
         type=int,
-        default=10,
+        default=1,
         help="probability update interval of the adaptive augmentation",
     )
     parser.add_argument(
@@ -649,7 +667,7 @@ if __name__ == "__main__":
                         help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
 
     parser.add_argument("--kl_lambda", type=float, default=0.01)
-    parser.add_argument("--mse", type=float, default=4, help="mse weight")
+    parser.add_argument("--mse", type=float, default=5, help="mse weight")
 
     args = parser.parse_args()
 
@@ -748,7 +766,7 @@ if __name__ == "__main__":
         g_ema.load_state_dict(ckpt["g_ema"])
         fine_generator.load_state_dict(ckpt["fine"])
 
-        g_optim.load_state_dict(ckpt["g_optim"])
+        # g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
 
     if args.fine_ckpt is not None:
