@@ -1665,4 +1665,6 @@ class Encoder_rep(nn.Module):
                 return z.view(self.n_latents, batch, self.w_dim).unbind(0), loss
             return out.view(batch, self.n_latents, self.w_dim), loss
         else:
-            return out.view(batch, self.w_dim), loss
+            if return_li:
+                return [out.view(batch, self.w_dim)], loss
+            return out.view(batch, self.w_dim)
