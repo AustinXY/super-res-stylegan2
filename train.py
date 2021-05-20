@@ -384,8 +384,8 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
             fake_img = output['image']
 
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
-            # rec_loss = F.mse_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
-            rec_loss = vgg_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
+            rec_loss = F.mse_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
+            # rec_loss = vgg_loss(fake_img, fine_img) * args.mse_reg_every * args.mse
 
             generator.zero_grad()
             rec_loss.backward()
@@ -435,7 +435,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
                     }
                 )
 
-            if i % 1000 == 0:
+            if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
 
