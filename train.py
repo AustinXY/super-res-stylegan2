@@ -435,7 +435,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
                     }
                 )
 
-            if i % 1000 == 0:
+            if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
 
