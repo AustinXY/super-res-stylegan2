@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import numpy as np
 import torch
