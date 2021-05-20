@@ -514,7 +514,7 @@ if __name__ == "__main__":
                         help='size of image (H*W), used in defining dataset and model')
     parser.add_argument("--prior_size", type=tuple,
                         default=(128, 128), help='input size to encoder')
-    parser.add_argument("--starting_height_size", type=int, default=32,
+    parser.add_argument("--starting_height_size", type=int, default=8,
                         help='encoder feature passed to generator, support 4,8,16,32.')
 
     parser.add_argument(
@@ -729,4 +729,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="super res")
 
+    torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, g_optim, d_optim, g_ema, device)

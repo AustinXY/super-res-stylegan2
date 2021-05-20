@@ -289,7 +289,12 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         loss_dict["fake_score"] = fake_pred.mean()
 
         discriminator.zero_grad()
-        d_loss.backward()
+        try:
+            d_loss.backward()
+        except:
+            print(style_z)
+            sys.exit()
+
         d_optim.step()
 
         if args.augment and args.augment_p == 0:
@@ -344,12 +349,17 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         loss = g_loss
         if from_fine_z:
-            loss += kl_loss
+            loss += kl_loss * args.kl_lambda
 
         loss_dict["g"] = g_loss
 
         generator.zero_grad()
-        loss.backward()
+        try:
+            loss.backward()
+        except:
+            print(style_z)
+            sys.exit()
+
         g_optim.step()
 
         g_regularize = i % args.g_reg_every == 0
@@ -810,5 +820,6 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="super res")
 
+    torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
           g_optim, d_optim, mk_optim, g_ema, device)

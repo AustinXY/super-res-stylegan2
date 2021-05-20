@@ -1115,20 +1115,23 @@ class Encoder(nn.Module):
             convs.append(_ResBlock(in_channel, out_channel))
             in_channel = out_channel
 
-        convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
-
+        # convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
         self.convs = nn.Sequential(*convs)
 
-    def forward(self, input, return_li=True, use_sigmoid=False):
+        self.final_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4, channels[4] * self.n_latents, activation="fused_lrelu"),
+            EqualLinear(channels[4] * self.n_latents, self.w_dim * self.n_latents))
+
+    def forward(self, input, return_li=True):
         batch = input.size(0)
         out = self.convs(input)
-
-        if use_sigmoid:
-            out = torch.sigmoid(out)
+        out = self.final_linear(out.view(batch, -1))
+        # if use_sigmoid:
+        out = torch.tanh(out) * 5
 
         if self.n_latents > 1:
             if return_li:
-                return out.view(self.n_latents, batch, self.w_dim).unbind(0)
+                return list(out.view(self.n_latents, batch, self.w_dim).unbind(0))
             return out.view(batch, self.n_latents, self.w_dim)
         else:
             if return_li:
@@ -1662,4 +1665,6 @@ class Encoder_rep(nn.Module):
                 return z.view(self.n_latents, batch, self.w_dim).unbind(0), loss
             return out.view(batch, self.n_latents, self.w_dim), loss
         else:
-            return out.view(batch, self.w_dim), loss
+            if return_li:
+                return [out.view(batch, self.w_dim)], loss
+            return out.view(batch, self.w_dim)
