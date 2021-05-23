@@ -1127,7 +1127,8 @@ class Encoder(nn.Module):
         out = self.convs(input)
         out = self.final_linear(out.view(batch, -1))
         # if use_sigmoid:
-        out = torch.tanh(out) * 5
+        # out = torch.tanh(out) * 5
+        return out.view(batch, self.n_latents, self.w_dim)
 
         if self.n_latents > 1:
             if return_li:
@@ -1598,7 +1599,7 @@ class G_NET(nn.Module):
 
         return rtn
 
-
+# reparameterize
 class Encoder_rep(nn.Module):
     def __init__(self, size, num_ws, img_channels=3, w_dim=512):
         super().__init__()
