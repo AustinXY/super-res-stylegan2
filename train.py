@@ -239,7 +239,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
     fine_generator.eval()
     fine_generator.requires_grad_(False)
 
-    vgg_loss = VGGLoss()
+    # vgg_loss = VGGLoss()
     for idx in pbar:
         i = idx + args.start_iter
 
