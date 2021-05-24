@@ -26,9 +26,7 @@ from distributed import (
     get_world_size,
 )
 
-# from scene_model import Discriminator
 from model import G_NET, UNet, Generator, Discriminator, Encoder
-from criteria.vgg import VGGLoss
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -268,6 +266,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
     fine_generator.eval()
     fine_generator.requires_grad_(False)
 
+    args.injidx = None
     for idx in pbar:
         i = idx + args.start_iter
 
@@ -280,29 +279,29 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         mpnet.train()
         mknet.train()
 
-        ############# train mk network #############
-        requires_grad(mknet, True)
-        requires_grad(discriminator, False)
-        requires_grad(mpnet, False)
-        requires_grad(generator, False)
+        # ############# train mk network #############
+        # requires_grad(mknet, True)
+        # requires_grad(discriminator, False)
+        # requires_grad(mpnet, False)
+        # requires_grad(generator, False)
 
-        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-        if not args.tie_code:
-            z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+        # z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        # if not args.tie_code:
+        #     z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-        fine_img, mask = fine_generator(z, b, p, c, rtn_mk=True)
-        pred_mask = mknet(fine_img)
+        # fine_img, mask = fine_generator(z, b, p, c, rtn_mk=True)
+        # pred_mask = mknet(fine_img)
 
-        bin_loss = binarization_loss(pred_mask) * args.bin
-        mk_loss = F.mse_loss(pred_mask, mask) * args.mk
+        # bin_loss = binarization_loss(pred_mask) * args.bin
+        # mk_loss = F.mse_loss(pred_mask, mask) * args.mk
 
-        mknet_loss = mk_loss + bin_loss
-        loss_dict["mk"] = mk_loss / args.mk
-        loss_dict["bin"] = bin_loss / args.bin
+        # mknet_loss = mk_loss + bin_loss
+        # loss_dict["mk"] = mk_loss / args.mk
+        # loss_dict["bin"] = bin_loss / args.bin
 
-        mknet.zero_grad()
-        mknet_loss.backward()
-        mk_optim.step()
+        # mknet.zero_grad()
+        # mknet_loss.backward()
+        # mk_optim.step()
 
         ############# train discriminator network #############
         requires_grad(mknet, False)
@@ -311,7 +310,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         requires_grad(generator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(noise, inject_index=args.injidx, randomize_noise=False)
+        fake_img, _ = generator(noise, inject_index=args.injidx)
 
         if args.augment:
             real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -350,31 +349,30 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             r1_loss = d_r1_loss(real_pred, real_img)
 
             discriminator.zero_grad()
-            (args.r1 / 2 * r1_loss * args.d_reg_every +
-             0 * real_pred[0]).backward()
+            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
 
             d_optim.step()
 
         loss_dict["r1"] = r1_loss
 
-        ############# train mapping network #############
-        requires_grad(mknet, False)
-        requires_grad(discriminator, False)
-        requires_grad(mpnet, True)
-        requires_grad(generator, False)
+        # ############# train mapping network #############
+        # requires_grad(mknet, False)
+        # requires_grad(discriminator, False)
+        # requires_grad(mpnet, True)
+        # requires_grad(generator, False)
 
-        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        # noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
-        style_img, latent = generator(noise, return_latents=True, randomize_noise=False)
-        _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-        wp_code = mpnet(_style_img)
+        # style_img, latent = generator(noise, inject_index=args.injidx, return_latents=True)
+        # _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
+        # wp_code = mpnet(_style_img)
 
-        mp_loss = F.mse_loss(wp_code, latent) * args.mp
-        loss_dict["mp"] = mp_loss / args.mp
+        # mp_loss = F.mse_loss(wp_code, latent) * args.mp
+        # loss_dict["mp"] = mp_loss / args.mp
 
-        mpnet.zero_grad()
-        mp_loss.backward()
-        mp_optim.step()
+        # mpnet.zero_grad()
+        # mp_loss.backward()
+        # mp_optim.step()
 
         ############# train generator network #############
         requires_grad(mknet, False)
@@ -383,7 +381,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         requires_grad(generator, True)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(noise, inject_index=args.injidx, randomize_noise=False)
+        fake_img, _ = generator(noise, inject_index=args.injidx)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -401,8 +399,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         if g_regularize:
             path_batch_size = max(1, args.batch // args.path_batch_shrink)
-            style_z = mixing_noise(path_batch_size, args.latent, args.mixing, device)
-            fake_img, latents = generator(style_z, inject_index=args.injidx, return_latents=True)
+            noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
+            fake_img, latents = generator(noise, return_latents=True)
 
             path_loss, mean_path_length, path_lengths = g_path_regularize(
                 fake_img, latents, mean_path_length
@@ -425,77 +423,81 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-        r = min(1, (i / 40000.)**4)
-        # r = 0
-        # args.mse_ = (1 - r) * args.mse
-        args.guide_mse_ = r * args.guide_mse
+        # r = min(1, (i / 40000.)**4)
+        # # r = 1
+        # # args.mse_ = (1 - r) * args.mse
+        # args.guide_mse_ = r * args.guide_mse
 
-        guide_regularize = i % args.guide_reg_every == 0
-        if guide_regularize:
-            z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-            if not args.tie_code:
-                z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+        # guide_regularize = i % args.guide_reg_every == 0
+        # guide_regularize = False
+        # if guide_regularize and args.guide_mse >= 1e-8:
+        #     z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        #     if not args.tie_code:
+        #         z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-            z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
+        #     z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
 
-            # same foreground
-            fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b1, p, c)
+        #     # same foreground
+        #     fine_img = fine_generator(z, b, p, c)
+        #     fine_img1 = fine_generator(z, b1, p, c)
 
-            fake_img = generator(fine_img, return_loss=False)['image']
-            fake_img1 = generator(fine_img1, return_loss=False)['image']
+        #     wp_code = mpnet(fine_img)
+        #     wp_code1 = mpnet(fine_img1)
 
-            _fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
-            _fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
+        #     fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+        #     fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
-            mask = F.interpolate(mknet(_fake_img), size=(512, 512), mode='area')
-            mask1 = F.interpolate(mknet(_fake_img1), size=(512, 512), mode='area')
+        #     _fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
+        #     _fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
 
-            mask = process_mask(mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-            mask1 = process_mask(mask1, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+        #     mask = F.interpolate(mknet(_fake_img), size=(512, 512), mode='area')
+        #     mask1 = F.interpolate(mknet(_fake_img1), size=(512, 512), mode='area')
 
-            mult_mask = mask * mask1
-            fg_img = mult_mask * fake_img
-            fg_img1 = mult_mask * fake_img1
+        #     mask = process_mask(mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+        #     mask1 = process_mask(mask1, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
 
-            fg_mse = F.mse_loss(fg_img, fg_img1) * args.guide_mse_
-            # loss_dict["fg"] = fg_mse / args.guide_mse_
+        #     mult_mask = mask * mask1
+        #     fg_img = mult_mask * fake_img
+        #     fg_img1 = mult_mask * fake_img1
 
-            generator.zero_grad()
-            fg_mse.backward()
-            g_optim.step()
+        #     fg_mse = F.mse_loss(fg_img, fg_img1) * args.guide_mse_
+        #     # loss_dict["fg"] = fg_mse / args.guide_mse_
 
-            # same background
-            fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b, p1, c1)
+        #     generator.zero_grad()
+        #     fg_mse.backward()
+        #     g_optim.step()
 
-            output = generator(fine_img, return_loss=False)
-            fake_img = output['image']
+        #     # same background
+        #     fine_img = fine_generator(z, b, p, c)
+        #     fine_img1 = fine_generator(z, b, p1, c1)
 
-            output = generator(fine_img1, return_loss=False)
-            fake_img1 = output['image']
+        #     wp_code = mpnet(fine_img)
+        #     wp_code1 = mpnet(fine_img1)
 
-            _fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
-            _fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
+        #     fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+        #     fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
-            mask = F.interpolate(mknet(_fake_img), size=(512, 512), mode='area')
-            mask1 = F.interpolate(mknet(_fake_img1), size=(512, 512), mode='area')
+        #     _fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
+        #     _fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
 
-            mask = process_mask(mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
-            mask1 = process_mask(mask1, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+        #     mask = F.interpolate(mknet(_fake_img), size=(512, 512), mode='area')
+        #     mask1 = F.interpolate(mknet(_fake_img1), size=(512, 512), mode='area')
 
-            bg_mask = torch.ones_like(mask) - mask
-            bg_mask1 = torch.ones_like(mask1) - mask1
-            mult_mask = bg_mask * bg_mask1
-            bg_img = mult_mask * fake_img
-            bg_img1 = mult_mask * fake_img1
+        #     mask = process_mask(mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+        #     mask1 = process_mask(mask1, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
 
-            bg_mse = F.mse_loss(bg_img, bg_img1) * args.guide_mse_
-            # loss_dict["bg"] = bg_mse / args.guide_mse_
+        #     bg_mask = torch.ones_like(mask) - mask
+        #     bg_mask1 = torch.ones_like(mask1) - mask1
+        #     mult_mask = bg_mask * bg_mask1
+        #     bg_img = mult_mask * fake_img
+        #     bg_img1 = mult_mask * fake_img1
 
-            generator.zero_grad()
-            bg_mse.backward()
-            g_optim.step()
+        #     bg_mse = F.mse_loss(bg_img, bg_img1) * args.guide_mse_
+        #     # loss_dict["bg"] = bg_mse / args.guide_mse_
+
+        #     generator.zero_grad()
+        #     bg_mse.backward()
+        #     g_optim.step()
 
 
         accumulate(g_ema, g_module, accum)
@@ -544,16 +546,21 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                     if not args.tie_code:
                         z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-                    fine_img = fine_generator(z, b, p, c)
+                    z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
 
-                    style_z, _ = mpnet(fine_img)
-                    style_img, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
+                    fine_img = fine_generator(z, b, p, c)
+                    wp_code = mpnet(fine_img)
+                    style_img, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+
+                    fine_img1 = fine_generator(z, b, p, c)
+                    wp_code = mpnet(fine_img1)
+                    style_img1, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
+                    style_img2, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
 
                     utils.save_image(
-                        fine_img,
+                        style_img,
                         f"sample/{str(i).zfill(6)}_0.png",
                         nrow=8,
                         normalize=True,
@@ -561,7 +568,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                     )
 
                     utils.save_image(
-                        style_img,
+                        style_img1,
                         f"sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
@@ -569,7 +576,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                     )
 
                     utils.save_image(
-                        style_img1,
+                        style_img2,
                         f"sample/{str(i).zfill(6)}_2.png",
                         nrow=8,
                         normalize=True,
@@ -579,8 +586,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "ref image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "change color image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
@@ -662,10 +669,16 @@ if __name__ == "__main__":
         default=4,
         help="interval of the applying path length regularization",
     )
+    # parser.add_argument(
+    #     "--mse_reg_every",
+    #     type=int,
+    #     default=10,
+    #     help="interval of the applying path length regularization",
+    # )
     parser.add_argument(
-        "--mse_reg_every",
+        "--guide_reg_every",
         type=int,
-        default=10,
+        default=4,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
@@ -740,6 +753,13 @@ if __name__ == "__main__":
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
     parser.add_argument("--guide_mse", type=float,
                         default=1, help="mse weight")
+    parser.add_argument("--bin", type=float, default=1, help="mse weight")
+    parser.add_argument("--mk", type=float, default=1, help="mse weight")
+    parser.add_argument("--mp", type=float, default=1, help="mse weight")
+
+    parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
+    parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
+    parser.add_argument("--mk_pdpx", type=int, default=2, help="Threshold for mask")
 
     args = parser.parse_args()
 
@@ -898,7 +918,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="super res")
+        wandb.init(project="guide style")
 
     torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
