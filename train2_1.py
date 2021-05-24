@@ -5,7 +5,7 @@ import math
 import random
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
 import torch
@@ -283,28 +283,28 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, g_optim
             real_img = real_img.to(device)
             mknet.train()
 
-            ############# train mk network #############
-            requires_grad(mknet, True)
-            requires_grad(generator, False)
-            requires_grad(discriminator, False)
+            # ############# train mk network #############
+            # requires_grad(mknet, True)
+            # requires_grad(generator, False)
+            # requires_grad(discriminator, False)
 
-            z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-            if not args.tie_code:
-                z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+            # z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+            # if not args.tie_code:
+            #     z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-            fine_img, mask = fine_generator(z, b, p, c, rtn_mk=True)
-            pred_mask = mknet(fine_img)
+            # fine_img, mask = fine_generator(z, b, p, c, rtn_mk=True)
+            # pred_mask = mknet(fine_img)
 
-            bin_loss = binarization_loss(pred_mask) * args.bin
-            mk_loss = F.mse_loss(pred_mask, mask) * args.mk
+            # bin_loss = binarization_loss(pred_mask) * args.bin
+            # mk_loss = F.mse_loss(pred_mask, mask) * args.mk
 
-            mknet_loss = mk_loss + bin_loss
-            loss_dict["mk"] = mk_loss / args.mk
-            loss_dict["bin"] = bin_loss / args.bin
+            # mknet_loss = mk_loss + bin_loss
+            # loss_dict["mk"] = mk_loss / args.mk
+            # loss_dict["bin"] = bin_loss / args.bin
 
-            mknet.zero_grad()
-            mknet_loss.backward()
-            mk_optim.step()
+            # mknet.zero_grad()
+            # mknet_loss.backward()
+            # mk_optim.step()
 
             ############# train discriminator network #############
             requires_grad(mknet, False)
@@ -427,8 +427,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, g_optim
             loss_dict["path"] = path_loss
             loss_dict["path_length"] = path_lengths.mean()
 
-            r = min(1, (i / 40000.)**4)
-            # r = 0
+            # r = min(1, (i / 40000.)**4)
+            r = 0
             args.mse_ = (1 - r) * args.mse
             args.guide_mse_ = r * args.guide_mse
 
@@ -439,7 +439,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, g_optim
                     z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
                 fine_img = fine_generator(z, b, p, c)
-                output = generator(fine_img.detach(), return_loss=False)
+                output = generator(fine_img, return_loss=False)
                 fake_img = output['image']
 
                 fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
@@ -453,7 +453,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, g_optim
                 g_optim.step()
 
             guide_regularize = i % args.guide_reg_every == 0
-            guide_regularize = True
+            guide_regularize = False
             if guide_regularize and args.guide_mse_ >= 1e-12:
                 z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                 if not args.tie_code:
@@ -622,7 +622,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, g_optim
                                 }
                             )
 
-                if i % 10000 == 0 and i != args.start_iter:
+                if i % 20000 == 0 and i != args.start_iter:
                     torch.save(
                         {
                             "g": g_module.state_dict(),
