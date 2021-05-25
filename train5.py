@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
 import torch
@@ -857,10 +857,10 @@ if __name__ == "__main__":
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
 
-    # if args.fine_ckpt is not None:
-    #     print("load fine model:", args.fine_ckpt)
-    #     fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
-    #     fine_generator.load_state_dict(fine_dict)
+    if args.fine_ckpt is not None:
+        print("load fine model:", args.fine_ckpt)
+        fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
+        fine_generator.load_state_dict(fine_dict)
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
@@ -868,6 +868,7 @@ if __name__ == "__main__":
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True
         )
 
         discriminator = nn.parallel.DistributedDataParallel(
@@ -875,6 +876,7 @@ if __name__ == "__main__":
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True
         )
 
         mpnet = nn.parallel.DistributedDataParallel(
@@ -882,6 +884,7 @@ if __name__ == "__main__":
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True
         )
 
         mknet = nn.parallel.DistributedDataParallel(
@@ -889,6 +892,7 @@ if __name__ == "__main__":
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True
         )
 
         fine_generator = nn.parallel.DistributedDataParallel(
@@ -896,6 +900,7 @@ if __name__ == "__main__":
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True
         )
 
     transform = transforms.Compose(
