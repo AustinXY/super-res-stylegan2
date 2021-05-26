@@ -272,7 +272,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
     fine_generator.eval()
     requires_grad(fine_generator, False)
 
-    args.injidx = None
+    # args.injidx = None
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -503,6 +503,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
+        mp_loss_val = loss_reduced["mp"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -526,6 +527,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
+                        "MP Recon": mp_loss_val,
                     }
                 )
 
@@ -575,16 +577,25 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        fine_img,
+                        f"sample/{str(i).zfill(6)}_3.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
                     if wandb and args.wandb:
                         wandb.log(
                             {
+                                "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
                                 "ref image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                                 "change color image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
 
-            if i % 30000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -595,6 +606,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "fine": fine_module.state_dict(),
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
+                        "mk_optim": mk_optim.state_dict(),
+                        "mp_optim": mp_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                     },
@@ -857,10 +870,10 @@ if __name__ == "__main__":
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
 
-    if args.fine_ckpt is not None:
-        print("load fine model:", args.fine_ckpt)
-        fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
-        fine_generator.load_state_dict(fine_dict)
+    # if args.fine_ckpt is not None:
+    print("load fine model:", args.fine_ckpt)
+    fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
+    fine_generator.load_state_dict(fine_dict)
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
