@@ -598,7 +598,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                     },
-                    f"checkpoint/{str(i).zfill(6)}_{args.n_noise}.pt",
+                    f"checkpoint/{str(i).zfill(6)}.pt",
                 )
 
 
