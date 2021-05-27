@@ -7,7 +7,7 @@ import os
 
 import numpy as np
 import torch
-from torch import nn, autograd, optim
+from torch import mul, nn, autograd, optim
 from torch.nn import functional as F
 from torch.utils import data
 import torch.distributed as dist
@@ -26,7 +26,8 @@ from distributed import (
     get_world_size,
 )
 
-from model import G_NET, UNet, Generator, Discriminator, Encoder
+from model import UNet, Generator, Discriminator, Encoder
+from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -223,10 +224,11 @@ def process_mask(mask, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     bin_mask = get_bin_mask(filled_mask, thrsh=thrsh1)
     return bin_mask
 
-def approx_bin_mask(img, mknet, args):
+
+def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     _img = F.interpolate(img, size=(128, 128), mode='area')
     mask = F.interpolate(mknet(_img), size=(512, 512), mode='area')
-    mask = process_mask(mask, args.mk_thrsh0, args.mk_thrsh1, args.mk_pdpx)
+    mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
 def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, g_optim, d_optim, mp_optim, mk_optim, g_ema, device):
@@ -430,11 +432,12 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         r = min(1, (i / 40000.)**4)
         # r = 1
         # args.mse_ = (1 - r) * args.mse
-        args.guide_mse_ = r * args.guide_mse
+        guide_mse_fg = r * args.guide_mse_fg
+        guide_mse_bg = r * args.guide_mse_bg
 
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
-        if guide_regularize and args.guide_mse >= 1e-8:
+        if guide_regularize and guide_mse_fg >= 1e-8:
             z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
             if not args.tie_code:
                 z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
@@ -442,8 +445,9 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
 
             # same foreground
+            fg_pdpx = 1
             fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b1, p, c)
+            fine_img1 = fine_generator(z1, b1, p, c, z_fg=z)
 
             wp_code = mpnet(fine_img)
             wp_code1 = mpnet(fine_img1)
@@ -451,46 +455,70 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
             fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
-            mask = approx_bin_mask(fake_img, mknet, args)
-            mask1 = approx_bin_mask(fake_img1, mknet, args)
-
-            mult_mask = mask * mask1
-            fg_img = mult_mask * fake_img
-            fg_img1 = mult_mask * fake_img1
-
-            fg_mse = F.mse_loss(fg_img, fg_img1) * args.guide_mse_
-            # loss_dict["fg"] = fg_mse / args.guide_mse_
-
-            generator.zero_grad()
-            fg_mse.backward()
-            g_optim.step()
-
-            # same background
-            fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b, p1, c1)
-
-            wp_code = mpnet(fine_img)
-            wp_code1 = mpnet(fine_img1)
-
-            fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
-            fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
-
-            mask = approx_bin_mask(fake_img, mknet, args)
-            mask1 = approx_bin_mask(fake_img1, mknet, args)
+            mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
+            mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
 
             bg_mask = torch.ones_like(mask) - mask
             bg_mask1 = torch.ones_like(mask1) - mask1
-            mult_mask = bg_mask * bg_mask1
-            bg_img = mult_mask * fake_img
-            bg_img1 = mult_mask * fake_img1
+            # intersection
+            inter_mask = bg_mask * bg_mask1
+            union_mask = torch.ones_like(inter_mask) - inter_mask
 
-            bg_mse = F.mse_loss(bg_img, bg_img1) * args.guide_mse_
-            # loss_dict["bg"] = bg_mse / args.guide_mse_
+            fg_img = union_mask * fake_img
+            fg_img1 = union_mask * fake_img1
+
+            fg_mse = torch.sum(
+                F.mse_loss(fg_img, fg_img1, reduction='none'), dim=(1,2,3)) / (torch.sum(union_mask, dim=(1,2,3)) + 1e-8)
+            fg_mse = torch.mean(fg_mse) * guide_mse_fg
+            loss_dict["fg"] = fg_mse / guide_mse_fg
 
             generator.zero_grad()
-            bg_mse.backward()
+
+            try:
+                fg_mse.backward()
+            except:
+                print(fake_img)
+                print(fake_img1)
+                sys.exit()
+
             g_optim.step()
 
+            # same background
+            bg_pdpx = 2
+            fine_img = fine_generator(z, b, p, c)
+            fine_img1 = fine_generator(z, b, p, c1)
+
+            wp_code = mpnet(fine_img)
+            wp_code1 = mpnet(fine_img1)
+
+            fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+
+            mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
+            mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
+
+            bg_mask = torch.ones_like(mask) - mask
+            bg_mask1 = torch.ones_like(mask1) - mask1
+            inter_mask = bg_mask * bg_mask1
+
+            bg_img = inter_mask * fake_img
+            bg_img1 = inter_mask * fake_img1
+
+            bg_mse = torch.sum(
+                F.mse_loss(bg_img, bg_img1, reduction='none'), dim=(1,2,3)) / (torch.sum(inter_mask, dim=(1,2,3)) + 1e-8)
+            bg_mse = torch.mean(bg_mse) * guide_mse_bg
+            loss_dict["bg"] = bg_mse / guide_mse_bg
+
+            generator.zero_grad()
+
+            try:
+                bg_mse.backward()
+            except:
+                print(fake_img)
+                print(fake_img1)
+                sys.exit()
+
+            g_optim.step()
 
         accumulate(g_ema, g_module, accum)
 
@@ -504,6 +532,12 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         mp_loss_val = loss_reduced["mp"].mean().item()
+        try:
+            bg_loss_val = loss_reduced["bg"].mean().item()
+            fg_loss_val = loss_reduced["fg"].mean().item()
+        except:
+            bg_loss_val = 0
+            fg_loss_val = 0
 
         if get_rank() == 0:
             pbar.set_description(
@@ -528,6 +562,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "MP Recon": mp_loss_val,
+                        "BG Recon": bg_loss_val,
+                        "FG Recon": fg_loss_val,
                     }
                 )
 
@@ -546,7 +582,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                     wp_code = mpnet(fine_img)
                     style_img, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
-                    fine_img1 = fine_generator(z, b1, p, c)
+                    fine_img1 = fine_generator(z, b, p, c1)
                     wp_code = mpnet(fine_img1)
                     style_img1, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
@@ -585,24 +621,33 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        fine_img1,
+                        f"sample/{str(i).zfill(6)}_4.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "ref fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "change bg fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
                                 "ref image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "change color image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "change bg image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 10000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
                         "d": d_module.state_dict(),
+                        "g_ema": g_ema.state_dict(),
                         "mk": mk_module.state_dict(),
                         "mp": mp_module.state_dict(),
-                        "g_ema": g_ema.state_dict(),
                         "fine": fine_module.state_dict(),
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
@@ -683,7 +728,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--guide_reg_every",
         type=int,
-        default=4,
+        default=3,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
@@ -756,8 +801,9 @@ if __name__ == "__main__":
 
     parser.add_argument("--kl_lambda", type=float, default=0.01)
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--guide_mse", type=float,
-                        default=1, help="mse weight")
+    parser.add_argument("--guide_mse_fg", type=float, default=1, help="mse weight")
+    parser.add_argument("--guide_mse_bg", type=float, default=1, help="mse weight")
+
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
@@ -850,6 +896,7 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
+    assert args.ckpt is not None or args.fine_ckpt is not None
     if args.ckpt is not None:
         print("load model:", args.ckpt)
 
@@ -865,15 +912,19 @@ if __name__ == "__main__":
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
+        mpnet.load_state_dict(ckpt["mp"])
+        mknet.load_state_dict(ckpt["mk"])
         fine_generator.load_state_dict(ckpt["fine"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
+        mp_optim.load_state_dict(ckpt["mp_optim"])
+        mk_optim.load_state_dict(ckpt["mk_optim"])
 
-    # if args.fine_ckpt is not None:
-    print("load fine model:", args.fine_ckpt)
-    fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
-    fine_generator.load_state_dict(fine_dict)
+    if args.fine_ckpt is not None:
+        print("load fine model:", args.fine_ckpt)
+        fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
+        fine_generator.load_state_dict(fine_dict)
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(

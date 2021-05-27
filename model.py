@@ -894,91 +894,91 @@ class GET_MASK(nn.Module):
         out_img = self.img(h_code)
         return out_img
 
-class ____G_NET(nn.Module):
-    def __init__(self, ds_name='CUB'):
-        super(G_NET, self).__init__()
-        self.gf_dim = finegan_config[ds_name]['GF_DIM']
-        self.ds_name = ds_name
-        self.define_module()
-        self.upsampling = nn.Upsample(scale_factor=2, mode='bilinear')
-        self.scale_fimg = nn.UpsamplingBilinear2d(size=[126, 126])
+# class G_NET(nn.Module):
+#     def __init__(self, ds_name='CUB'):
+#         super(G_NET, self).__init__()
+#         self.gf_dim = finegan_config[ds_name]['GF_DIM']
+#         self.ds_name = ds_name
+#         self.define_module()
+#         self.upsampling = nn.Upsample(scale_factor=2, mode='bilinear')
+#         self.scale_fimg = nn.UpsamplingBilinear2d(size=[126, 126])
 
-    def define_module(self):
-        #Background stage
-        self.h_net1_bg = INIT_STAGE_G(self.gf_dim * 16, 2, ds_name=self.ds_name)
-        # Background generation network
-        self.img_net1_bg = GET_IMAGE(self.gf_dim)
+#     def define_module(self):
+#         #Background stage
+#         self.h_net1_bg = INIT_STAGE_G(self.gf_dim * 16, 2, ds_name=self.ds_name)
+#         # Background generation network
+#         self.img_net1_bg = GET_IMAGE(self.gf_dim)
 
-        # Parent stage networks
-        self.h_net1 = INIT_STAGE_G(self.gf_dim * 16, 1, ds_name=self.ds_name)
-        self.h_net2 = NEXT_STAGE_G(self.gf_dim, use_hrc=1, ds_name=self.ds_name)
-        # Parent foreground generation network
-        self.img_net2 = GET_IMAGE(self.gf_dim // 2)
-        # Parent mask generation network
-        self.img_net2_mask = GET_MASK(self.gf_dim // 2)
+#         # Parent stage networks
+#         self.h_net1 = INIT_STAGE_G(self.gf_dim * 16, 1, ds_name=self.ds_name)
+#         self.h_net2 = NEXT_STAGE_G(self.gf_dim, use_hrc=1, ds_name=self.ds_name)
+#         # Parent foreground generation network
+#         self.img_net2 = GET_IMAGE(self.gf_dim // 2)
+#         # Parent mask generation network
+#         self.img_net2_mask = GET_MASK(self.gf_dim // 2)
 
-        # Child stage networks
-        self.h_net3 = NEXT_STAGE_G(self.gf_dim // 2, use_hrc=0, ds_name=self.ds_name)
-        # Child foreground generation network
-        self.img_net3 = GET_IMAGE(self.gf_dim // 4)
-        # Child mask generation network
-        self.img_net3_mask = GET_MASK(self.gf_dim // 4)
+#         # Child stage networks
+#         self.h_net3 = NEXT_STAGE_G(self.gf_dim // 2, use_hrc=0, ds_name=self.ds_name)
+#         # Child foreground generation network
+#         self.img_net3 = GET_IMAGE(self.gf_dim // 4)
+#         # Child mask generation network
+#         self.img_net3_mask = GET_MASK(self.gf_dim // 4)
 
-    def forward(self, z_code, bg_code, p_code, c_code, z_fg=None, rtn_type='fnl', rtn_mk=False):
+#     def forward(self, z_code, bg_code, p_code, c_code, z_fg=None, rtn_type='fnl', rtn_mk=False):
 
-        fake_imgs = []  # Will contain [background image, parent image, child image]
-        fg_imgs = []  # Will contain [parent foreground, child foreground]
-        mk_imgs = []  # Will contain [parent mask, child mask]
-        fg_mk = []  # Will contain [masked parent foreground, masked child foreground]
+#         fake_imgs = []  # Will contain [background image, parent image, child image]
+#         fg_imgs = []  # Will contain [parent foreground, child foreground]
+#         mk_imgs = []  # Will contain [parent mask, child mask]
+#         fg_mk = []  # Will contain [masked parent foreground, masked child foreground]
 
-        #Background stage
-        h_code1_bg = self.h_net1_bg(z_code, bg_code)
-        fake_img1 = self.img_net1_bg(h_code1_bg)  # Background image
-        # Resizing fake background image from 128x128 to the resolution which background discriminator expects: 126 x 126.
-        fake_img1_126 = self.scale_fimg(fake_img1)
-        fake_imgs.append(fake_img1_126)
+#         #Background stage
+#         h_code1_bg = self.h_net1_bg(z_code, bg_code)
+#         fake_img1 = self.img_net1_bg(h_code1_bg)  # Background image
+#         # Resizing fake background image from 128x128 to the resolution which background discriminator expects: 126 x 126.
+#         fake_img1_126 = self.scale_fimg(fake_img1)
+#         fake_imgs.append(fake_img1_126)
 
-        #Parent stage
-        h_code1 = self.h_net1(z_fg, p_code)
-        h_code2 = self.h_net2(h_code1, p_code)
-        fake_img2_foreground = self.img_net2(h_code2)  # Parent foreground
-        fake_img2_mask = self.img_net2_mask(h_code2)  # Parent mask
-        ones_mask_p = torch.ones_like(fake_img2_mask)
-        opp_mask_p = ones_mask_p - fake_img2_mask
-        fg_masked2 = torch.mul(fake_img2_foreground, fake_img2_mask)
-        fg_mk.append(fg_masked2)
-        bg_masked2 = torch.mul(fake_img1, opp_mask_p)
-        fake_img2_final = fg_masked2 + bg_masked2  # Parent image
-        fake_imgs.append(fake_img2_final)
-        fg_imgs.append(fake_img2_foreground)
-        mk_imgs.append(fake_img2_mask)
+#         #Parent stage
+#         h_code1 = self.h_net1(z_fg, p_code)
+#         h_code2 = self.h_net2(h_code1, p_code)
+#         fake_img2_foreground = self.img_net2(h_code2)  # Parent foreground
+#         fake_img2_mask = self.img_net2_mask(h_code2)  # Parent mask
+#         ones_mask_p = torch.ones_like(fake_img2_mask)
+#         opp_mask_p = ones_mask_p - fake_img2_mask
+#         fg_masked2 = torch.mul(fake_img2_foreground, fake_img2_mask)
+#         fg_mk.append(fg_masked2)
+#         bg_masked2 = torch.mul(fake_img1, opp_mask_p)
+#         fake_img2_final = fg_masked2 + bg_masked2  # Parent image
+#         fake_imgs.append(fake_img2_final)
+#         fg_imgs.append(fake_img2_foreground)
+#         mk_imgs.append(fake_img2_mask)
 
-        #Child stage
-        h_code3 = self.h_net3(h_code2, c_code)
-        fake_img3_foreground = self.img_net3(h_code3)  # Child foreground
-        fake_img3_mask = self.img_net3_mask(h_code3)  # Child mask
-        ones_mask_c = torch.ones_like(fake_img3_mask)
-        opp_mask_c = ones_mask_c - fake_img3_mask
-        fg_masked3 = torch.mul(fake_img3_foreground, fake_img3_mask)
-        fg_mk.append(fg_masked3)
-        bg_masked3 = torch.mul(fake_img2_final, opp_mask_c)
-        fake_img3_final = fg_masked3 + bg_masked3  # Child image
-        fake_imgs.append(fake_img3_final)
-        fg_imgs.append(fake_img3_foreground)
-        mk_imgs.append(fake_img3_mask)
+#         #Child stage
+#         h_code3 = self.h_net3(h_code2, c_code)
+#         fake_img3_foreground = self.img_net3(h_code3)  # Child foreground
+#         fake_img3_mask = self.img_net3_mask(h_code3)  # Child mask
+#         ones_mask_c = torch.ones_like(fake_img3_mask)
+#         opp_mask_c = ones_mask_c - fake_img3_mask
+#         fg_masked3 = torch.mul(fake_img3_foreground, fake_img3_mask)
+#         fg_mk.append(fg_masked3)
+#         bg_masked3 = torch.mul(fake_img2_final, opp_mask_c)
+#         fake_img3_final = fg_masked3 + bg_masked3  # Child image
+#         fake_imgs.append(fake_img3_final)
+#         fg_imgs.append(fake_img3_foreground)
+#         mk_imgs.append(fake_img3_mask)
 
-        if rtn_mk:
-            return fake_img3_final, fake_img2_mask
+#         if rtn_mk:
+#             return fake_img3_final, fake_img2_mask
 
-        # return fake_imgs, fg_imgs, mk_imgs, fg_mk
-        rtn = fake_img3_final
-        if rtn_type == 'pmk':
-            rtn = fake_img2_mask
-        elif rtn_type == 'cmk':
-            rtn = fake_img3_mask
-        elif rtn_type == 'bg':
-            rtn = fake_img1
-        return rtn, None
+#         # return fake_imgs, fg_imgs, mk_imgs, fg_mk
+#         rtn = fake_img3_final
+#         if rtn_type == 'pmk':
+#             rtn = fake_img2_mask
+#         elif rtn_type == 'cmk':
+#             rtn = fake_img3_mask
+#         elif rtn_type == 'bg':
+#             rtn = fake_img1
+#         return rtn, None
 
 #----------------------------------------------------------------------------
 
@@ -1412,192 +1412,6 @@ class ImgMixer(nn.Module):
 
         return x.view(batch, self.n_latents, self.w_dim)
 
-
-
-
-## mxnmch g ###################################################################
-class BACKGROUND_STAGE(nn.Module):
-    def __init__(self, ngf, ds_name='CUB'):
-        super().__init__()
-
-        self.ngf = ngf
-        in_dim = finegan_config[ds_name]['Z_DIM'] + finegan_config[ds_name]['FINE_GRAINED_CATEGORIES']
-
-        self.fc = nn.Sequential( nn.Linear(in_dim, ngf*4*4 * 2, bias=False), nn.BatchNorm1d(ngf*4*4 * 2), GLU())
-        # 1024*4*4
-        self.upsample1 = upBlock(ngf, ngf // 2)
-        # 512*8*8
-        self.upsample2 = upBlock(ngf // 2, ngf // 4)
-        # 256*16*16
-        self.upsample3 = upBlock(ngf // 4, ngf // 8)
-        # 128*32*32
-        self.upsample4 = upBlock(ngf // 8, ngf // 8)
-        # 128*64*64
-        self.upsample5 = upBlock(ngf // 8, ngf // 16)
-        # 64*128*128
-
-    def forward(self, z_input, input):
-        in_code = torch.cat([z_input, input], dim=1)
-        out_code = self.fc(in_code).view(-1, self.ngf, 4, 4)
-        out_code = self.upsample1(out_code)
-        out_code = self.upsample2(out_code)
-        out_code = self.upsample3(out_code)
-        out_code = self.upsample4(out_code)
-        out_code = self.upsample5(out_code)
-        return out_code
-
-
-class PARENT_STAGE(nn.Module):
-    def __init__(self, ngf, ds_name='CUB'):
-        super().__init__()
-
-        self.ngf = ngf
-        in_dim = finegan_config[ds_name]['Z_DIM'] + finegan_config[ds_name]['SUPER_CATEGORIES']
-        self.code_len = finegan_config[ds_name]['SUPER_CATEGORIES']
-
-        self.fc = nn.Sequential(nn.Linear(in_dim, ngf*4*4 * 2, bias=False), nn.BatchNorm1d(ngf*4*4 * 2), GLU())
-        # 512*4*4
-        self.upsample1 = upBlock(ngf, ngf//2)
-        # 256*8*8
-        self.upsample2 = upBlock(ngf // 2, ngf // 4)
-        # 128*16*16
-        self.upsample3 = upBlock(ngf // 4, ngf // 8)
-        # 64*32*32
-        self.upsample4 = upBlock(ngf // 8, ngf // 32)
-        # 16*64*64
-        self.upsample5 = upBlock(ngf // 32, ngf // 32)
-        # 16*128*128
-        self.jointConv = sameBlock(finegan_config[ds_name]['SUPER_CATEGORIES']+ngf//32, ngf//32)
-        # (16+20)*128*128 --> 16*128*128
-        self.residual = self._make_layer(3, ngf//32)
-        # 16*128*128
-
-    def _make_layer(self,num_residual,ngf):
-        layers = []
-        for _ in range(num_residual):
-            layers.append( ResBlock(ngf) )
-        return nn.Sequential(*layers)
-
-    def forward(self, z_input, input):
-        in_code = torch.cat([z_input, input], dim=1)
-        out_code = self.fc(in_code).view(-1, self.ngf, 4, 4)
-        out_code = self.upsample1(out_code)
-        out_code = self.upsample2(out_code)
-        out_code = self.upsample3(out_code)
-        out_code = self.upsample4(out_code)
-        out_code = self.upsample5(out_code)
-
-        h, w  = out_code.size(2),out_code.size(3)
-        input = input.view(-1, self.code_len, 1, 1).repeat(1, 1, h, w)
-        out_code = torch.cat( (out_code, input), dim=1)
-        out_code = self.jointConv(out_code)
-        out_code = self.residual(out_code)
-        return out_code
-
-
-class CHILD_STAGE(nn.Module):
-    def __init__(self, ngf, num_residual=2, ds_name='CUB'):
-        super().__init__()
-
-        self.ngf = ngf
-        self.code_len = finegan_config[ds_name]['FINE_GRAINED_CATEGORIES']
-        self.num_residual = num_residual
-
-        self.jointConv = sameBlock( self.code_len+self.ngf, ngf*2 )
-        self.residual = self._make_layer()
-        self.samesample = sameBlock(ngf*2, ngf)
-
-    def _make_layer(self):
-        layers = []
-        for _ in range(self.num_residual):
-            layers.append( ResBlock(self.ngf*2) )
-        return nn.Sequential(*layers)
-
-    def forward(self, h_code, code):
-
-        h, w  = h_code.size(2),h_code.size(3)
-        code = code.view(-1, self.code_len, 1, 1).repeat(1, 1, h, w)
-        h_c_code = torch.cat((code, h_code), 1)
-
-        out_code = self.jointConv(h_c_code)
-        out_code = self.residual(out_code)
-        out_code = self.samesample(out_code)
-        return out_code
-
-
-class G_NET(nn.Module):
-    def __init__(self, ds_name='CUB'):
-        super(G_NET, self).__init__()
-
-        ngf = finegan_config[ds_name]['GF_DIM']
-        self.scale_fimg = nn.UpsamplingBilinear2d(size=[126, 126])
-
-        # Background stage
-        self.background_stage = BACKGROUND_STAGE( ngf*8 )
-        self.background_image = GET_IMAGE(ngf//2)
-
-        # Parent stage networks
-        self.parent_stage = PARENT_STAGE( ngf*8 )
-        self.parent_image = GET_IMAGE( ngf//4 )
-        self.parent_mask = GET_MASK( ngf//4 )
-
-        # Child stage networks
-        self.child_stage = CHILD_STAGE( ngf//4 )
-        self.child_image = GET_IMAGE( ngf//4 )
-        self.child_mask = GET_MASK( ngf//4 )
-
-    def forward(self, z_code, b_code, p_code, c_code, z_fg=None, rtn_type='fnl', rtn_mk=False):
-
-        fake_imgs = []  # Will contain [background image, parent image, child image]
-        fg_imgs = []  # Will contain [parent foreground, child foreground]
-        mk_imgs = []  # Will contain [parent mask, child mask]
-        fg_mk = []  # Will contain [masked parent foreground, masked child foreground]
-
-        if z_fg is None:
-            z_fg = z_code.clone()
-
-        # Background stage
-        temp = self.background_stage( z_code, b_code )
-        fake_img1 = self.background_image( temp )  # Background image
-        fake_img1_126 = self.scale_fimg(fake_img1)
-        fake_imgs.append(fake_img1_126)
-
-        # Parent stage
-        p_temp = self.parent_stage(z_fg, p_code)
-        fake_img2_foreground = self.parent_image(p_temp)  # Parent foreground
-        fake_img2_mask = self.parent_mask(p_temp)  # Parent mask
-        fg_masked2 = fake_img2_foreground*fake_img2_mask # masked_parent
-        fake_img2 = fg_masked2 + fake_img1*(1-fake_img2_mask)  # Parent image
-        fg_mk.append(fg_masked2)
-        fake_imgs.append(fake_img2)
-        fg_imgs.append(fake_img2_foreground)
-        mk_imgs.append(fake_img2_mask)
-
-        # Child stage
-        temp = self.child_stage(p_temp, c_code)
-        fake_img3_foreground = self.child_image(temp)  # Child foreground
-        fake_img3_mask = self.child_mask(temp)  # Child mask
-        fg_masked3 = torch.mul(fake_img3_foreground, fake_img3_mask) # masked child
-        fake_img3 = fg_masked3 + fake_img2*(1-fake_img3_mask)  # Child image
-        fg_mk.append(fg_masked3)
-        fake_imgs.append(fake_img3)
-        fg_imgs.append(fake_img3_foreground)
-        mk_imgs.append(fake_img3_mask)
-
-        if rtn_mk:
-            return fake_img3, fake_img2_mask
-
-        rtn = fake_img3
-        if rtn_type == 'pmk':
-            rtn = fake_img2_mask
-        elif rtn_type == 'cmk':
-            rtn = fake_img3_mask
-        elif rtn_type == 'bg':
-            rtn = fake_img1
-        elif rtn_type == 'cmsk':
-            rtn = fg_masked3
-
-        return rtn
 
 # reparameterize
 class Encoder_rep(nn.Module):
