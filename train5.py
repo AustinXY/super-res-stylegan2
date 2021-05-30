@@ -483,14 +483,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             loss_dict["fg"] = fg_mse / guide_mse_fg
 
             generator.zero_grad()
-
-            try:
-                fg_mse.backward()
-            except:
-                print(fake_img)
-                print(fake_img1)
-                sys.exit()
-
+            fg_mse.backward()
             g_optim.step()
 
             # same background
@@ -520,14 +513,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             loss_dict["bg"] = bg_mse / guide_mse_bg
 
             generator.zero_grad()
-
-            try:
-                bg_mse.backward()
-            except:
-                print(fake_img)
-                print(fake_img1)
-                sys.exit()
-
+            bg_mse.backward()
             g_optim.step()
 
         accumulate(g_ema, g_module, accum)
@@ -992,6 +978,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="guide style")
 
-    torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
           g_optim, d_optim, mp_optim, mk_optim, g_ema, device)
