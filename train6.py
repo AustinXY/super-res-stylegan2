@@ -872,6 +872,6 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="guide style mk sep")
 
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, mpnet,
           g_optim, d_optim, mp_optim, g_ema, device)
