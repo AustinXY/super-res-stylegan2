@@ -2,9 +2,8 @@ import argparse
 import math
 import random
 import os
-import gc
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 import numpy as np
 import torch
@@ -453,15 +452,21 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             wp_code = mpnet(fine_img)
             wp_code1 = mpnet(fine_img1)
 
-            fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
-            fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            delta_wp = wp_code1 - wp_code
+            rat1 = random.uniform(-0.1, 1.1)
+            wp1 = wp_code + rat1 * delta_wp
+            rat2 = random.uniform(-0.1, 1.1)
+            wp2 = wp_code + rat2 * delta_wp
+
+            fake_img, _ = generator([wp1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            fake_img1, _ = generator([wp2], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
             mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
             mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
 
             bg_mask = torch.ones_like(mask) - mask
             bg_mask1 = torch.ones_like(mask1) - mask1
-            # intersection
+            # mask intersection
             inter_mask = bg_mask * bg_mask1
             union_mask = torch.ones_like(inter_mask) - inter_mask
 
@@ -482,11 +487,14 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             fine_img = fine_generator(z, b, p, c)
             fine_img1 = fine_generator(z, b, p, c1)
 
-            wp_code = mpnet(fine_img)
-            wp_code1 = mpnet(fine_img1)
+            delta_wp = wp_code1 - wp_code
+            rat1 = random.uniform(-0.1, 1.1)
+            wp1 = wp_code + rat1 * delta_wp
+            rat2 = random.uniform(-0.1, 1.1)
+            wp2 = wp_code + rat2 * delta_wp
 
-            fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
-            fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            fake_img, _ = generator([wp1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            fake_img1, _ = generator([wp2], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
 
             mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
             mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
@@ -627,7 +635,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -877,7 +885,7 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
-    # assert args.ckpt is not None or args.fine_ckpt is not None
+    assert args.ckpt is not None or args.fine_ckpt is not None
     if args.ckpt is not None:
         print("load model:", args.ckpt)
 
