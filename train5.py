@@ -324,18 +324,9 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         else:
             real_img_aug = real_img
 
-        try:
-            fake_pred = discriminator(fake_img)
-            real_pred = discriminator(real_img_aug)
-            d_loss = d_logistic_loss(real_pred, fake_pred)
-        except:
-            for obj in gc.get_objects():
-                try:
-                    if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-                        print(type(obj), obj.size())
-                except:
-                    sys.exit()
-            sys.exit()
+        fake_pred = discriminator(fake_img)
+        real_pred = discriminator(real_img_aug)
+        d_loss = d_logistic_loss(real_pred, fake_pred)
 
         loss_dict["d"] = d_loss
         loss_dict["real_score"] = real_pred.mean()
@@ -483,14 +474,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             loss_dict["fg"] = fg_mse / guide_mse_fg
 
             generator.zero_grad()
-
-            try:
-                fg_mse.backward()
-            except:
-                print(fake_img)
-                print(fake_img1)
-                sys.exit()
-
+            fg_mse.backward()
             g_optim.step()
 
             # same background
@@ -520,14 +504,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             loss_dict["bg"] = bg_mse / guide_mse_bg
 
             generator.zero_grad()
-
-            try:
-                bg_mse.backward()
-            except:
-                print(fake_img)
-                print(fake_img1)
-                sys.exit()
-
+            bg_mse.backward()
             g_optim.step()
 
         accumulate(g_ema, g_module, accum)

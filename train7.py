@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 import numpy as np
 import torch
@@ -453,10 +453,10 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             wp_code1 = mpnet(fine_img1)
 
             delta_wp = wp_code1 - wp_code
-            c1 = random.uniform(-0.1, 1.1)
-            wp1 = wp_code + c1 * delta_wp
-            c2 = random.uniform(-0.1, 1.1)
-            wp2 = wp_code + c2 * delta_wp
+            rat1 = random.uniform(-0.1, 1.1)
+            wp1 = wp_code + rat1 * delta_wp
+            rat2 = random.uniform(-0.1, 1.1)
+            wp2 = wp_code + rat2 * delta_wp
 
             fake_img, _ = generator([wp1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
             fake_img1, _ = generator([wp2], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
@@ -488,10 +488,10 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             fine_img1 = fine_generator(z, b, p, c1)
 
             delta_wp = wp_code1 - wp_code
-            c1 = random.uniform(-0.1, 1.1)
-            wp1 = wp_code + c1 * delta_wp
-            c2 = random.uniform(-0.1, 1.1)
-            wp2 = wp_code + c2 * delta_wp
+            rat1 = random.uniform(-0.1, 1.1)
+            wp1 = wp_code + rat1 * delta_wp
+            rat2 = random.uniform(-0.1, 1.1)
+            wp2 = wp_code + rat2 * delta_wp
 
             fake_img, _ = generator([wp1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
             fake_img1, _ = generator([wp2], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
@@ -512,14 +512,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             loss_dict["bg"] = bg_mse / guide_mse_bg
 
             generator.zero_grad()
-
-            try:
-                bg_mse.backward()
-            except:
-                print(fake_img)
-                print(fake_img1)
-                sys.exit()
-
+            bg_mse.backward()
             g_optim.step()
 
         accumulate(g_ema, g_module, accum)
@@ -642,7 +635,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -984,6 +977,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="guide style")
 
-    torch.autograd.set_detect_anomaly(True)
     train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
           g_optim, d_optim, mp_optim, mk_optim, g_ema, device)
