@@ -394,7 +394,9 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
         style_img, latent = generator(noise, inject_index=args.injidx, return_latents=True)
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
         wp_code = mpnet(_style_img)
-        wp_code = g_module.mix_latent(wp_code, args.injidx)
+
+        if args.mp_nws == 2:
+            latent = torch.cat((latent[:, 0:1], latent[:, args.injidx:args.injidx+1]), dim=1)
 
         mp_loss = F.mse_loss(wp_code, latent) * args.mp
         loss_dict["mp"] = mp_loss / args.mp
@@ -421,9 +423,8 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
             fine_img = fine_generator(z, b, p, c)
 
             wp_code = mpnet(fine_img)
-            wp_code = g_module.mix_latent(wp_code, args.injidx)
 
-            fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx)
+            fake_img, _ = generator(wp_code, input_is_latent=True)
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
             vgg_loss = vgg(fake_img, fine_img) * args.vgg
             loss_dict["vgg"] = vgg_loss / args.vgg
@@ -444,6 +445,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].item()
+        mp_loss_val = loss_reduced["mp"].item()
 
 
         if get_rank() == 0:
@@ -469,6 +471,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "VGG Recon": vgg_loss_val,
+                        "MP": mp_loss_val
                     }
                 )
 
@@ -485,12 +488,10 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
-                    wp_code = g_module.mix_latent(wp_code, args.injidx)
                     style_img, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     fine_img1 = fine_generator(z, b, p, c1)
                     wp_code = mpnet(fine_img1)
-                    wp_code = g_module.mix_latent(wp_code, args.injidx)
                     style_img1, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
@@ -709,6 +710,7 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
+    args.mp_nws = 2
 
     args.start_iter = 0
 
@@ -745,7 +747,7 @@ if __name__ == "__main__":
 
     mpnet = Encoder(
         size=128,
-        num_ws=2,
+        num_ws=args.mp_nws,
         w_dim=args.latent
     ).to(device)
 
@@ -781,10 +783,12 @@ if __name__ == "__main__":
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
+        mpnet.load_state_dict(ckpt['mp'])
         fine_generator.load_state_dict(ckpt["fine"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
+        mp_optim.load_state_dict(ckpt["mp_optim"])
 
     if args.fine_ckpt is not None:
         print("load fine model:", args.fine_ckpt)
