@@ -16,6 +16,7 @@ from tqdm import tqdm
 from PIL import Image
 from finegan_config import finegan_config
 import wandb
+from criteria.vgg import VGGLoss
 
 from dataset import MultiResolutionDataset
 from distributed import (
@@ -26,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import UNet, Generator, Discriminator, Encoder
+from model import UNet, Generator, Discriminator, Encoder, Classifier
 from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
@@ -231,7 +232,7 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, g_optim, d_optim, mp_optim, mk_optim, g_ema, device):
+def train(args, loader, generator, discriminator, fine_generator, classifier, mpnet, vgg, g_optim, d_optim, mp_optim, cl_optim, g_ema, device):
     loader = sample_data(loader)
 
     pbar = range(args.iter)
@@ -255,13 +256,13 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         d_module = discriminator.module
         fine_module = fine_generator.module
         mp_module = mpnet.module
-        mk_module = mknet.module
+        cl_module = classifier.module
     else:
         g_module = generator
         d_module = discriminator
         fine_module = fine_generator
         mp_module = mpnet
-        mk_module = mknet
+        cl_module = classifier
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -286,28 +287,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         real_img = next(loader)
         real_img = real_img.to(device)
         mpnet.train()
-        mknet.train()
-
-        ############# train mk network #############
-        requires_grad(mknet, True)
-
-        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-        if not args.tie_code:
-            z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
-
-        fine_img, mask = fine_generator(z, b, p, c, rtn_mk=True)
-        pred_mask = mknet(fine_img)
-
-        bin_loss = binarization_loss(pred_mask) * args.bin
-        mk_loss = F.mse_loss(pred_mask, mask) * args.mk
-
-        mknet_loss = mk_loss + bin_loss
-        loss_dict["mk"] = mk_loss / args.mk
-        loss_dict["bin"] = bin_loss / args.bin
-
-        mknet.zero_grad()
-        mknet_loss.backward()
-        mk_optim.step()
+        classifier.train()
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -425,98 +405,40 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         mp_optim.step()
 
         ############# guide disentangle #############
-        requires_grad(mknet, False)
+        requires_grad(classifier, True)
         requires_grad(mpnet, False)
         requires_grad(generator, True)
 
-        r = min(1, (i / 80000.)**2)
-        # r = 1
-        # args.mse_ = (1 - r) * args.mse
-        guide_mse_fg = r * args.guide_mse_fg
-        guide_mse_bg = r * args.guide_mse_bg
-
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
-        if guide_regularize and guide_mse_fg >= 1e-8:
-            with torch.no_grad():
-                noises = g_module.make_noise()
-
-            z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if guide_regularize:
+            z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
             if not args.tie_code:
                 z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-            z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
-
-            # same foreground
-            fg_pdpx = 1
             fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z1, b1, p, c, z_fg=z)
 
-            wp_code = mpnet(fine_img)
-            wp_code1 = mpnet(fine_img1)
+            wp = mpnet(fine_img)
 
-            delta_wp = wp_code1 - wp_code
-            rat1 = random.uniform(-0.1, 1.1)
-            wp1 = wp_code + rat1 * delta_wp
-            rat2 = random.uniform(-0.1, 1.1)
-            wp2 = wp_code + rat2 * delta_wp
+            fake_img, _ = generator(wp, input_is_latent=True, inject_index=args.injidx)
 
-            fake_img, _ = generator([wp1], input_is_latent=True, inject_index=args.injidx, noise=noises)
-            fake_img1, _ = generator([wp2], input_is_latent=True, inject_index=args.injidx, noise=noises)
+            preds = classifier(fake_img)
 
-            mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
-            mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
+            b_info = F.cross_entropy(preds[0], torch.nonzero(b.long())[:, 1])
+            p_info = F.cross_entropy(preds[1], torch.nonzero(p.long())[:, 1])
+            c_info = F.cross_entropy(preds[2], torch.nonzero(c.long())[:, 1])
 
-            bg_mask = torch.ones_like(mask) - mask
-            bg_mask1 = torch.ones_like(mask1) - mask1
-            # mask intersection
-            inter_mask = bg_mask * bg_mask1
-            union_mask = torch.ones_like(inter_mask) - inter_mask
+            loss = (b_info + p_info + c_info) * args.info
 
-            fg_img = union_mask * fake_img
-            fg_img1 = union_mask * fake_img1
-
-            fg_mse = torch.sum(
-                F.mse_loss(fg_img, fg_img1, reduction='none'), dim=(1,2,3)) / (torch.sum(union_mask, dim=(1,2,3)) + 1e-8)
-            fg_mse = torch.mean(fg_mse) * guide_mse_fg
-            loss_dict["fg"] = fg_mse / guide_mse_fg
+            loss_dict["b_info"] = b_info
+            loss_dict["p_info"] = p_info
+            loss_dict["c_info"] = c_info
 
             generator.zero_grad()
-            fg_mse.backward()
+            classifier.zero_grad()
+            loss.backward()
             g_optim.step()
-
-            # same background
-            bg_pdpx = 2
-            fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b, p, c1)
-
-            delta_wp = wp_code1 - wp_code
-            rat1 = random.uniform(-0.1, 1.1)
-            wp1 = wp_code + rat1 * delta_wp
-            rat2 = random.uniform(-0.1, 1.1)
-            wp2 = wp_code + rat2 * delta_wp
-
-            fake_img, _ = generator([wp1], input_is_latent=True, inject_index=args.injidx, noise=noises)
-            fake_img1, _ = generator([wp2], input_is_latent=True, inject_index=args.injidx, noise=noises)
-
-            mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
-            mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
-
-            bg_mask = torch.ones_like(mask) - mask
-            bg_mask1 = torch.ones_like(mask1) - mask1
-            inter_mask = bg_mask * bg_mask1
-
-            bg_img = inter_mask * fake_img
-            bg_img1 = inter_mask * fake_img1
-
-            bg_mse = torch.sum(
-                F.mse_loss(bg_img, bg_img1, reduction='none'), dim=(1,2,3)) / (torch.sum(inter_mask, dim=(1,2,3)) + 1e-8)
-            bg_mse = torch.mean(bg_mse) * guide_mse_bg
-            loss_dict["bg"] = bg_mse / guide_mse_bg
-
-            generator.zero_grad()
-            bg_mse.backward()
-            g_optim.step()
+            cl_optim.step()
 
         accumulate(g_ema, g_module, accum)
 
@@ -530,12 +452,9 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         mp_loss_val = loss_reduced["mp"].mean().item()
-        try:
-            bg_loss_val = loss_reduced["bg"].mean().item()
-            fg_loss_val = loss_reduced["fg"].mean().item()
-        except:
-            bg_loss_val = 0
-            fg_loss_val = 0
+        binfo_loss_val = loss_reduced["b_info"].mean().item()
+        pinfo_loss_val = loss_reduced["p_info"].mean().item()
+        cinfo_loss_val = loss_reduced["c_info"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -560,8 +479,9 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "MP Recon": mp_loss_val,
-                        "BG Recon": bg_loss_val,
-                        "FG Recon": fg_loss_val,
+                        "B Info": binfo_loss_val,
+                        "P Info": pinfo_loss_val,
+                        "C Info": cinfo_loss_val,
                     }
                 )
 
@@ -569,6 +489,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                 with torch.no_grad():
                     g_ema.eval()
                     mpnet.eval()
+                    noises = g_module.make_noise()
 
                     z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     if not args.tie_code:
@@ -578,14 +499,14 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
-                    style_img, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+                    style_img, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     fine_img1 = fine_generator(z, b, p, c1)
                     wp_code = mpnet(fine_img1)
-                    style_img1, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+                    style_img1, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
+                    style_img2, _ = g_ema(style_z, inject_index=args.injidx)
 
                     utils.save_image(
                         style_img,
@@ -644,18 +565,18 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "g": g_module.state_dict(),
                         "d": d_module.state_dict(),
                         "g_ema": g_ema.state_dict(),
-                        "mk": mk_module.state_dict(),
+                        "cl": cl_module.state_dict(),
                         "mp": mp_module.state_dict(),
                         "fine": fine_module.state_dict(),
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
-                        "mk_optim": mk_optim.state_dict(),
+                        "cl_optim": cl_optim.state_dict(),
                         "mp_optim": mp_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_5_1.pt",
+                    f"checkpoint/{str(i).zfill(6)}_5_2.pt",
                 )
 
 
@@ -794,16 +715,10 @@ if __name__ == "__main__":
 
     parser.add_argument("--kl_lambda", type=float, default=0.01)
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--guide_mse_fg", type=float, default=5, help="mse weight")
-    parser.add_argument("--guide_mse_bg", type=float, default=5, help="mse weight")
 
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
-    parser.add_argument("--mk", type=float, default=1, help="mse weight")
+    parser.add_argument("--info", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
-
-    parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
-    parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
-    parser.add_argument("--mk_pdpx", type=int, default=2, help="Threshold for mask")
 
     args = parser.parse_args()
 
@@ -850,20 +765,23 @@ if __name__ == "__main__":
 
     fine_generator = G_NET(ds_name=args.ds_name).to(device)
 
+    classifier = Classifier(
+        size=args.size,
+        img_channels=3,
+        b_dim=args.b_dim,
+        p_dim=args.p_dim,
+        c_dim=args.c_dim
+    ).to(device)
+
+
     mpnet = Encoder(
         size=128,
         num_ws=generator.n_latent,
         w_dim=args.latent
     ).to(device)
 
-    mknet = UNet(
-        n_channels=3,
-        n_classes=1,
-        bilinear=True,
-    ).to(device)
-
-    mk_optim = optim.Adam(
-        mknet.parameters(),
+    cl_optim = optim.Adam(
+        classifier.parameters(),
         lr=args.lr,
         betas=(0, 0.99),
     )
@@ -873,6 +791,8 @@ if __name__ == "__main__":
         lr=args.lr,
         betas=(0, 0.99),
     )
+
+    vgg = VGGLoss()
 
     g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
@@ -895,24 +815,25 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        try:
-            ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
+        args.start_iter = 20000
+        # try:
+        #     ckpt_name = os.path.basename(args.ckpt)
+        #     args.start_iter = int(os.path.splitext(ckpt_name)[0])
 
-        except ValueError:
-            args.start_iter = int(os.path.splitext(ckpt_name)[0].split('_')[0])
+        # except ValueError:
+        #     args.start_iter = int(os.path.splitext(ckpt_name)[0].split('_')[0])
 
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
         mpnet.load_state_dict(ckpt["mp"])
-        mknet.load_state_dict(ckpt["mk"])
+        # classifier.load_state_dict(ckpt["cl"])
         fine_generator.load_state_dict(ckpt["fine"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
         mp_optim.load_state_dict(ckpt["mp_optim"])
-        mk_optim.load_state_dict(ckpt["mk_optim"])
+        # cl_optim.load_state_dict(ckpt["cl_optim"])
 
     if args.fine_ckpt is not None:
         print("load fine model:", args.fine_ckpt)
@@ -944,8 +865,8 @@ if __name__ == "__main__":
             find_unused_parameters=True
         )
 
-        mknet = nn.parallel.DistributedDataParallel(
-            mknet,
+        classifier = nn.parallel.DistributedDataParallel(
+            classifier,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -954,6 +875,14 @@ if __name__ == "__main__":
 
         fine_generator = nn.parallel.DistributedDataParallel(
             fine_generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=True
+        )
+
+        vgg = nn.parallel.DistributedDataParallel(
+            vgg,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -979,7 +908,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide style")
+        wandb.init(project="guide 5_2")
 
-    train(args, loader, generator, discriminator, fine_generator, mknet, mpnet,
-          g_optim, d_optim, mp_optim, mk_optim, g_ema, device)
+    train(args, loader, generator, discriminator, fine_generator, classifier, mpnet, vgg
+          g_optim, d_optim, mp_optim, cl_optim, g_ema, device)

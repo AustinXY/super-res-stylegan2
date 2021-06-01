@@ -527,6 +527,7 @@ class Generator(nn.Module):
 
     def get_latent(self, input):
         return self.style(input)
+        # return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
 
     def mix_latent(self, styles, inject_index):
         if styles.size(1) == self.n_latent:
@@ -1523,3 +1524,77 @@ class Encoder_rep(nn.Module):
             if return_li:
                 return [out.view(batch, self.w_dim)], loss
             return out.view(batch, self.w_dim)
+
+
+class Classifier(nn.Module):
+    def __init__(self, size, img_channels=3, b_dim=200, p_dim=20, c_dim=200):
+        super().__init__()
+
+        channels = {
+            1: 512,
+            4: 512,
+            8: 512,
+            16: 512,
+            32: 512,
+            64: 256,
+            128: 128,
+            256: 64,
+            512: 32,
+            1024: 16
+        }
+
+        self.b_dim = b_dim
+        self.p_dim = p_dim
+        self.c_dim = c_dim
+
+        log_size = int(math.log(size, 2))
+        convs = [ConvLayer(img_channels, channels[size], 1)]
+
+        in_channel = channels[size]
+        for i in range(log_size, 2, -1):
+            out_channel = channels[2 ** (i - 1)]
+            convs.append(_ResBlock(in_channel, out_channel))
+            in_channel = out_channel
+
+        self.convs = nn.Sequential(*convs)
+
+        # convs.append(EqualConv2d(in_channel, self.n_latents*self.w_dim, 4, padding=0, bias=False))
+
+        self.b_conv = nn.Sequential(
+            EqualConv2d(channels[4], channels[1], 4, padding=0, bias=False))
+
+        self.p_conv = nn.Sequential(
+            EqualConv2d(channels[4], channels[1], 4, padding=0, bias=False))
+
+        self.c_conv = nn.Sequential(
+            EqualConv2d(channels[4], channels[1], 4, padding=0, bias=False))
+
+        self.b_final = nn.Sequential(
+            EqualLinear(channels[1], channels[1], activation="fused_lrelu"),
+            EqualLinear(channels[1], self.b_dim))
+
+        self.p_final = nn.Sequential(
+            EqualLinear(channels[1], channels[1], activation="fused_lrelu"),
+            EqualLinear(channels[1], self.p_dim))
+
+        self.c_final = nn.Sequential(
+            EqualLinear(channels[1], channels[1], activation="fused_lrelu"),
+            EqualLinear(channels[1], self.c_dim))
+
+    def forward(self, input):
+        batch = input.size(0)
+        out = self.convs(input)
+        b_out = self.b_conv(out)
+        pred_b = self.b_final(b_out.view(batch, -1))
+        pred_b = torch.sigmoid(pred_b).view(batch, self.b_dim)
+
+        p_out = self.p_conv(out)
+        pred_p = self.p_final(p_out.view(batch, -1))
+        pred_p = torch.sigmoid(pred_p).view(batch, self.p_dim)
+
+        c_out = self.c_conv(out)
+        pred_c = self.c_final(c_out.view(batch, -1))
+        pred_c = torch.sigmoid(pred_c).view(batch, self.c_dim)
+        # if use_sigmoid:
+        # out = torch.tanh(out) * 5
+        return (pred_b, pred_p, pred_c)
