@@ -529,7 +529,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -617,7 +617,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--guide_reg_every",
         type=int,
-        default=3,
+        default=1,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
@@ -690,7 +690,7 @@ if __name__ == "__main__":
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
-    parser.add_argument("--vgg", type=float, default=2, help="vgg weight")
+    parser.add_argument("--vgg", type=float, default=1, help="vgg weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -776,13 +776,7 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        try:
-            ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
-
-        except ValueError:
-            args.start_iter = 20000
-
+        args.start_iter = ckpt['cur_itr']
 
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
@@ -816,14 +810,6 @@ if __name__ == "__main__":
 
         mpnet = nn.parallel.DistributedDataParallel(
             mpnet,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-            find_unused_parameters=True
-        )
-
-        vgg = nn.parallel.DistributedDataParallel(
-            vgg,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
