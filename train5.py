@@ -275,7 +275,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
     fine_generator.eval()
     requires_grad(fine_generator, False)
 
-    args.injidx = None
+    # args.injidx = None
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -418,6 +418,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
         wp_code = mpnet(_style_img)
 
+        latent = torch.cat((latent[:, 0:1], latent[:, args.injidx:args.injidx+1]), dim=1)
+
         mp_loss = F.mse_loss(wp_code, latent) * args.mp
         loss_dict["mp"] = mp_loss / args.mp
 
@@ -430,15 +432,18 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         requires_grad(mpnet, False)
         requires_grad(generator, True)
 
-        r = min(1, (i / 40000.)**4)
+        r = min(1, (i / 10000.)**4)
         # r = 1
         # args.mse_ = (1 - r) * args.mse
         guide_mse_fg = r * args.guide_mse_fg
         guide_mse_bg = r * args.guide_mse_bg
 
         guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
+        guide_regularize = False
         if guide_regularize and guide_mse_fg >= 1e-8:
+            with torch.no_grad():
+                noises = g_module.make_noise()
+
             z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
             if not args.tie_code:
                 z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
@@ -453,8 +458,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             wp_code = mpnet(fine_img)
             wp_code1 = mpnet(fine_img1)
 
-            fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
-            fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
+            fake_img1, _ = generator(wp_code1, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
             mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
             mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, fg_pdpx)
@@ -485,8 +490,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             wp_code = mpnet(fine_img)
             wp_code1 = mpnet(fine_img1)
 
-            fake_img, _ = generator([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
-            fake_img1, _ = generator([wp_code1], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+            fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
+            fake_img1, _ = generator(wp_code1, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
             mask = approx_bin_mask(fake_img, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
             mask1 = approx_bin_mask(fake_img1, mknet, args.mk_thrsh0, args.mk_thrsh1, bg_pdpx)
@@ -559,6 +564,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                     g_ema.eval()
                     mpnet.eval()
 
+                    noises = g_module.make_noise()
                     z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     if not args.tie_code:
                         z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
@@ -567,14 +573,14 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
-                    style_img, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+                    style_img, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     fine_img1 = fine_generator(z, b, p, c1)
                     wp_code = mpnet(fine_img1)
-                    style_img1, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, randomize_noise=False)
+                    style_img1, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, _ = g_ema(style_z, inject_index=args.injidx, randomize_noise=False)
+                    style_img2, _ = g_ema(style_z, inject_index=args.injidx)
 
                     utils.save_image(
                         style_img,
@@ -642,8 +648,9 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
                         "mp_optim": mp_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}.pt",
+                    f"checkpoint/{str(i).zfill(6)}_5.pt",
                 )
 
 
@@ -782,12 +789,12 @@ if __name__ == "__main__":
 
     parser.add_argument("--kl_lambda", type=float, default=0.01)
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--guide_mse_fg", type=float, default=5, help="mse weight")
-    parser.add_argument("--guide_mse_bg", type=float, default=5, help="mse weight")
+    parser.add_argument("--guide_mse_fg", type=float, default=1, help="mse weight")
+    parser.add_argument("--guide_mse_bg", type=float, default=1, help="mse weight")
 
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
-    parser.add_argument("--mp", type=float, default=1, help="mse weight")
+    parser.add_argument("--mp", type=float, default=5, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -840,7 +847,7 @@ if __name__ == "__main__":
 
     mpnet = Encoder(
         size=128,
-        num_ws=generator.n_latent,
+        num_ws=2,
         w_dim=args.latent
     ).to(device)
 
@@ -886,6 +893,7 @@ if __name__ == "__main__":
         try:
             ckpt_name = os.path.basename(args.ckpt)
             args.start_iter = int(os.path.splitext(ckpt_name)[0])
+            args.start_iter = 0
 
         except ValueError:
             pass
@@ -893,13 +901,13 @@ if __name__ == "__main__":
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
-        mpnet.load_state_dict(ckpt["mp"])
+        # mpnet.load_state_dict(ckpt["mp"])
         mknet.load_state_dict(ckpt["mk"])
         fine_generator.load_state_dict(ckpt["fine"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
-        mp_optim.load_state_dict(ckpt["mp_optim"])
+        # mp_optim.load_state_dict(ckpt["mp_optim"])
         mk_optim.load_state_dict(ckpt["mk_optim"])
 
     if args.fine_ckpt is not None:
