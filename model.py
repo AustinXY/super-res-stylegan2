@@ -528,6 +528,18 @@ class Generator(nn.Module):
     def get_latent(self, input):
         return self.style(input)
 
+    def mix_latent(self, styles, inject_index):
+        assert len(styles) == 2
+        if inject_index is None:
+            inject_index = random.randint(1, self.n_latent - 1)
+
+        latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+        latent2 = styles[1].unsqueeze(1).repeat(
+            1, self.n_latent - inject_index, 1)
+
+        latent = torch.cat([latent, latent2], 1)
+        return latent
+
     def forward(
         self,
         styles,
@@ -1151,6 +1163,9 @@ class Encoder(nn.Module):
         out = self.final_linear(out.view(batch, -1))
         # if use_sigmoid:
         # out = torch.tanh(out) * 5
+        if self.n_latents == 2:
+            return out.view(self.n_latents, batch, self.w_dim).unbind(0)
+
         return out.view(batch, self.n_latents, self.w_dim)
 
         if self.n_latents > 1:
