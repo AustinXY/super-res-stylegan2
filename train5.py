@@ -417,7 +417,8 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         style_img, latent = generator(noise, inject_index=args.injidx, return_latents=True)
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
         wp_code = mpnet(_style_img)
-        wp_code = g_module.mix_latent(wp_code, args.injidx)
+
+        latent = torch.cat((latent[:, 0:1], latent[:, args.injidx:args.injidx+1]), dim=1)
 
         mp_loss = F.mse_loss(wp_code, latent) * args.mp
         loss_dict["mp"] = mp_loss / args.mp
@@ -438,7 +439,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         guide_mse_bg = r * args.guide_mse_bg
 
         guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
+        guide_regularize = False
         if guide_regularize and guide_mse_fg >= 1e-8:
             with torch.no_grad():
                 noises = g_module.make_noise()
@@ -793,7 +794,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
-    parser.add_argument("--mp", type=float, default=1, help="mse weight")
+    parser.add_argument("--mp", type=float, default=5, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")

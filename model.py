@@ -527,6 +527,7 @@ class Generator(nn.Module):
 
     def get_latent(self, input):
         return self.style(input)
+        # return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
 
     def mix_latent(self, styles, inject_index):
         assert len(styles) == 2
@@ -1164,7 +1165,7 @@ class Encoder(nn.Module):
         # if use_sigmoid:
         # out = torch.tanh(out) * 5
         if self.n_latents == 2:
-            return out.view(self.n_latents, batch, self.w_dim).unbind(0)
+            return out.view(self.n_latents, batch, self.w_dim)
 
         return out.view(batch, self.n_latents, self.w_dim)
 
