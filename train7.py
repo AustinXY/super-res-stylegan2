@@ -274,7 +274,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
     fine_generator.eval()
     requires_grad(fine_generator, False)
 
-    args.injidx = None
+    # args.injidx = None
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -285,6 +285,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
 
         real_img = next(loader)
         real_img = real_img.to(device)
+        mpnet.train()
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -393,6 +394,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
         style_img, latent = generator(noise, inject_index=args.injidx, return_latents=True)
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
         wp_code = mpnet(_style_img)
+        wp_code = g_module.mix_latent(wp_code, args.injidx)
 
         mp_loss = F.mse_loss(wp_code, latent) * args.mp
         loss_dict["mp"] = mp_loss / args.mp
@@ -412,13 +414,15 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
         if guide_regularize:
-            z, b, p, c = sample_codes(args.batch//2, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+            z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
             if not args.tie_code:
                 z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
             fine_img = fine_generator(z, b, p, c)
 
             wp_code = mpnet(fine_img)
+            wp_code = g_module.mix_latent(wp_code, args.injidx)
+
             fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx)
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
             vgg_loss = vgg(fake_img, fine_img) * args.vgg
@@ -481,10 +485,12 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
+                    wp_code = g_module.mix_latent(wp_code, args.injidx)
                     style_img, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     fine_img1 = fine_generator(z, b, p, c1)
                     wp_code = mpnet(fine_img1)
+                    wp_code = g_module.mix_latent(wp_code, args.injidx)
                     style_img1, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
@@ -739,7 +745,7 @@ if __name__ == "__main__":
 
     mpnet = Encoder(
         size=128,
-        num_ws=generator.n_latent,
+        num_ws=2,
         w_dim=args.latent
     ).to(device)
 
