@@ -428,11 +428,15 @@ def train(args, loader, generator, discriminator, fine_generator, classifier, mp
             p_info = F.cross_entropy(preds[1], torch.nonzero(p.long())[:, 1])
             c_info = F.cross_entropy(preds[2], torch.nonzero(c.long())[:, 1])
 
-            loss = (b_info + p_info + c_info) * args.info
+            fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
+            vgg_loss = vgg(fake_img, fine_img) * args.vgg
+
+            loss = (b_info + p_info + c_info) * args.info + vgg_loss
 
             loss_dict["b_info"] = b_info
             loss_dict["p_info"] = p_info
             loss_dict["c_info"] = c_info
+            loss_dict["vgg"] = vgg_loss / args.vgg
 
             generator.zero_grad()
             classifier.zero_grad()
@@ -499,11 +503,11 @@ def train(args, loader, generator, discriminator, fine_generator, classifier, mp
 
                     fine_img = fine_generator(z, b, p, c)
                     wp_code = mpnet(fine_img)
-                    style_img, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, noise=noises)
+                    style_img, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     fine_img1 = fine_generator(z, b, p, c1)
                     wp_code = mpnet(fine_img1)
-                    style_img1, _ = g_ema([wp_code], input_is_latent=True, inject_index=args.injidx, noise=noises)
+                    style_img1, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
                     style_img2, _ = g_ema(style_z, inject_index=args.injidx)
@@ -719,6 +723,7 @@ if __name__ == "__main__":
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--info", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
+    parser.add_argument("--vgg", type=float, default=0.5, help="mse weight")
 
     args = parser.parse_args()
 
@@ -910,5 +915,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="guide 5_2")
 
-    train(args, loader, generator, discriminator, fine_generator, classifier, mpnet, vgg
+    train(args, loader, generator, discriminator, fine_generator, classifier, mpnet, vgg,
           g_optim, d_optim, mp_optim, cl_optim, g_ema, device)
