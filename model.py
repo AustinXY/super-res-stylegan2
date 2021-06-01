@@ -563,13 +563,9 @@ class Generator(nn.Module):
             styles = style_t
 
         if not input_is_latent:
-            if input_is_latent or len(styles) < 2:
+            if len(styles) < 2:
                 inject_index = self.n_latent
-
-                if input_is_latent:
-                    latent = styles
-                else:
-                    latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+                latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
 
             else:
                 if inject_index is None:
