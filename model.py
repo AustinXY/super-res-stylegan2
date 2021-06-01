@@ -529,21 +529,6 @@ class Generator(nn.Module):
         return self.style(input)
         # return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
 
-    def mix_latent(self, styles, inject_index):
-        if styles.size(1) == self.n_latent:
-            return styles
-
-        assert len(styles) == 2
-        if inject_index is None:
-            inject_index = random.randint(1, self.n_latent - 1)
-
-        latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-        latent2 = styles[1].unsqueeze(1).repeat(
-            1, self.n_latent - inject_index, 1)
-
-        latent = torch.cat([latent, latent2], 1)
-        return latent
-
     def forward(
         self,
         styles,
@@ -577,23 +562,43 @@ class Generator(nn.Module):
 
             styles = style_t
 
-        if input_is_latent or len(styles) < 2:
-            inject_index = self.n_latent
+        if not input_is_latent:
+            if input_is_latent or len(styles) < 2:
+                inject_index = self.n_latent
 
-            if input_is_latent:
-                latent = styles
+                if input_is_latent:
+                    latent = styles
+                else:
+                    latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+
             else:
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
+
                 latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+                latent2 = styles[1].unsqueeze(1).repeat(
+                    1, self.n_latent - inject_index, 1)
 
+                latent = torch.cat([latent, latent2], 1)
+
+        # input is latent
         else:
-            if inject_index is None:
-                inject_index = random.randint(1, self.n_latent - 1)
+            if styles.size(1) == 1:
+                inject_index = self.n_latent
+                latent = styles.repeat(1, inject_index, 1)
 
-            latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            latent2 = styles[1].unsqueeze(1).repeat(
-                1, self.n_latent - inject_index, 1)
+            elif styles.size(1) == 2:
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
 
-            latent = torch.cat([latent, latent2], 1)
+                latent = styles[:, 0:1].repeat(1, inject_index, 1)
+                latent2 = styles[:, 1:2].repeat(
+                    1, self.n_latent - inject_index, 1)
+
+                latent = torch.cat([latent, latent2], 1)
+
+            else:
+                latent = styles
 
         out = self.input(latent)
         out = self.conv1(out, latent[:, 0], noise=noise[0])
@@ -1166,9 +1171,6 @@ class Encoder(nn.Module):
         out = self.final_linear(out.view(batch, -1))
         # if use_sigmoid:
         # out = torch.tanh(out) * 5
-        if self.n_latents == 2:
-            return out.view(self.n_latents, batch, self.w_dim)
-
         return out.view(batch, self.n_latents, self.w_dim)
 
         if self.n_latents > 1:
