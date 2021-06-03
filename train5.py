@@ -410,9 +410,9 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
 
         ############# train mapping network #############
         requires_grad(mpnet, True)
-        requires_grad(generator, False)
+        requires_grad(generator, True)
 
-        # noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
         style_img, latent = generator(noise, inject_index=args.injidx, return_latents=True)
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
@@ -425,15 +425,17 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
         loss_dict["mp"] = mp_loss / args.mp
 
         mpnet.zero_grad()
+        generator.zero_grad()
         mp_loss.backward()
         mp_optim.step()
+        g_optim.step()
 
         ############# guide disentangle #############
         requires_grad(mknet, False)
         requires_grad(mpnet, False)
         requires_grad(generator, True)
 
-        # r = min(1, (i / 10000.)**4)
+        # r = min(1, (i / 20000.)**4)
         r = 1
         # args.mse_ = (1 - r) * args.mse
         guide_mse_fg = r * args.guide_mse_fg
@@ -513,23 +515,23 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             bg_mse.backward()
             g_optim.step()
 
-            # match mpnet
-            requires_grad(mpnet, True)
-            requires_grad(generator, False)
+            # # match mpnet
+            # requires_grad(mpnet, True)
+            # requires_grad(generator, False)
 
-            with torch.no_grad():
-                fine_img = fine_generator(z, b, p, c)
-                latent = mpnet(fine_img)
+            # with torch.no_grad():
+            #     fine_img = fine_generator(z, b, p, c)
+            #     latent = mpnet(fine_img)
 
-            style_img, _ = generator(latent, input_is_latent=True, inject_index=args.injidx)
-            _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-            wp_code = mpnet(_style_img)
+            # style_img, _ = generator(latent, input_is_latent=True, inject_index=args.injidx)
+            # _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
+            # wp_code = mpnet(_style_img)
 
-            mp_loss = F.mse_loss(wp_code, latent) * args.mp
+            # mp_loss = F.mse_loss(wp_code, latent) * args.mp
 
-            mpnet.zero_grad()
-            mp_loss.backward()
-            mp_optim.step()
+            # mpnet.zero_grad()
+            # mp_loss.backward()
+            # mp_optim.step()
 
 
         accumulate(g_ema, g_module, accum)
