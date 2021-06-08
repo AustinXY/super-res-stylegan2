@@ -392,7 +392,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             )
 
             generator.zero_grad()
-            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
+            weighted_path_loss = args.path_regularize * path_loss
 
             if args.path_batch_shrink:
                 weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
@@ -488,7 +488,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             # same background
             bg_pdpx = 2
             fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b, p, c1)
+            fine_img1 = fine_generator(z, b, p1, c1, z_fg=z1)
 
             wp_code = mpnet(fine_img)
             wp_code1 = mpnet(fine_img1)
@@ -714,7 +714,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path_regularize",
         type=float,
-        default=2,
+        default=1,
         help="weight of the path length regularization",
     )
     parser.add_argument(
