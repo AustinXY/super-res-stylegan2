@@ -17,7 +17,6 @@ from tqdm import tqdm
 from PIL import Image
 from finegan_config import finegan_config
 import wandb
-from criteria.vgg import VGGLoss
 
 from dataset import MultiResolutionDataset
 from distributed import (
@@ -233,7 +232,7 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_optim, d_optim, mp_optim, g_ema, device):
+def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim, d_optim, mp_optim, g_ema, device):
     loader = sample_data(loader)
 
     pbar = range(args.iter)
@@ -406,32 +405,91 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
         mp_optim.step()
 
         ############# guide disentangle #############
-        requires_grad(mpnet, False)
+        requires_grad(mpnet, True)
         requires_grad(generator, True)
-
-        # r = min(1, (i / 50000.)**2)
-        # guide_mse_fg = r * args.guide_mse_fg
-        # guide_mse_bg = r * args.guide_mse_bg
 
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
         if guide_regularize:
-            z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-            if not args.tie_code:
-                z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+            with torch.no_grad():
+                noises = g_module.make_noise()
 
-            fine_img = fine_generator(z, b, p, c)
+                z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                if not args.tie_code:
+                    z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-            wp_code = mpnet(fine_img)
+                z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
 
-            fake_img, _ = generator(wp_code, input_is_latent=True)
-            fake_img = F.interpolate(fake_img, size=(128, 128), mode='bicubic')
-            vgg_loss = vgg(fake_img, fine_img) * args.vgg
-            loss_dict["vgg"] = vgg_loss / args.vgg
+                # same foreground
+                fine_img = fine_generator(z, b, p, c)
+                fine_img1 = fine_generator(z1, b1, p, c, z_fg=z)
+                wp_code = mpnet(fine_img)
+                wp_code1 = mpnet(fine_img1)
+
+            fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
+            fake_img1, _ = generator(wp_code1, input_is_latent=True, inject_index=args.injidx, noise=noises)
+
+            fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
+            fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
+
+            wp_code_ = mpnet(fine_img)
+            wp_code1_ = mpnet(fine_img1)
+
+            fg_w_loss = F.mse_loss(wp_code_[:, :, 0:args.fg_dim], wp_code1_[:, :, 0:args.fg_dim])
+            fg_w_loss_ = fg_w_loss * args.guide_mse_fg
+
+            rec_loss = F.mse_loss(wp_code_, wp_code) + F.mse_loss(wp_code1_, wp_code1)
+            rec_loss_ = rec_loss * args.rec
+
+            loss = fg_w_loss_ + rec_loss_
+
+            loss_dict["fg"] = fg_w_loss
 
             generator.zero_grad()
-            vgg_loss.backward()
+            mpnet.zero_grad()
+            loss.backward()
             g_optim.step()
+            mp_optim.step()
+
+            # same background
+            with torch.no_grad():
+                noises = g_module.make_noise()
+
+                z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                if not args.tie_code:
+                    z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+
+                z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
+
+                fine_img = fine_generator(z, b, p, c)
+                fine_img1 = fine_generator(z, b, p, c1, z_fg=z)
+                wp_code = mpnet(fine_img)
+                wp_code1 = mpnet(fine_img1)
+
+            fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
+            fake_img1, _ = generator(wp_code1, input_is_latent=True, inject_index=args.injidx, noise=noises)
+
+            fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
+            fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
+
+            wp_code_ = mpnet(fine_img)
+            wp_code1_ = mpnet(fine_img1)
+
+            bg_w_loss = F.mse_loss(wp_code_[:, :, args.fg_dim:], wp_code1_[:, :, args.fg_dim:])
+            bg_w_loss_ = bg_w_loss * args.guide_mse_bg
+
+            rec_loss = F.mse_loss(wp_code_, wp_code) + F.mse_loss(wp_code1_, wp_code1)
+            rec_loss_ = rec_loss * args.rec
+
+            loss = bg_w_loss_ + rec_loss_
+
+            loss_dict["bg"] = bg_w_loss
+
+            generator.zero_grad()
+            mpnet.zero_grad()
+            loss.backward()
+            g_optim.step()
+            mp_optim.step()
 
         accumulate(g_ema, g_module, accum)
 
@@ -444,8 +502,9 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        vgg_loss_val = loss_reduced["vgg"].item()
         mp_loss_val = loss_reduced["mp"].item()
+        bg_loss_val = loss_reduced["bg"].item()
+        fg_loss_val = loss_reduced["fg"].item()
 
 
         if get_rank() == 0:
@@ -462,24 +521,23 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
                     {
                         "Generator": g_loss_val,
                         "Discriminator": d_loss_val,
-                        "Augment": ada_aug_p,
-                        "Rt": r_t_stat,
-                        "R1": r1_val,
                         "Path Length Regularization": path_loss_val,
                         "Mean Path Length": mean_path_length,
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "VGG Recon": vgg_loss_val,
-                        "MP": mp_loss_val
+                        "MP": mp_loss_val,
+                        "FG code sim": fg_loss_val,
+                        "BG code sim": bg_loss_val
                     }
                 )
 
             if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
-                    noises = g_module.make_noise()
+                    mpnet.eval()
 
+                    noises = g_module.make_noise()
                     z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
                     if not args.tie_code:
                         z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
@@ -521,12 +579,30 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, vgg, g_
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        fine_img,
+                        f"sample/{str(i).zfill(6)}_3.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        fine_img1,
+                        f"sample/{str(i).zfill(6)}_4.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "style image1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
-                                "rand style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "ref fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "change bg fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
+                                "ref image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "change bg image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
 
@@ -689,9 +765,8 @@ if __name__ == "__main__":
     parser.add_argument("--guide_mse_bg", type=float, default=2, help="mse weight")
 
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
-    parser.add_argument("--mk", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
-    parser.add_argument("--vgg", type=float, default=1, help="vgg weight")
+    parser.add_argument("--rec", type=float, default=0.2, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -743,7 +818,6 @@ if __name__ == "__main__":
 
     fine_generator = G_NET(ds_name=args.ds_name).to(device)
 
-    vgg = VGGLoss()
 
     mpnet = Encoder(
         size=128,
@@ -837,7 +911,7 @@ if __name__ == "__main__":
         ]
     )
 
-    dataset = MultiResolutionDataset(args.path, transform, args.style_dim)
+    dataset = MultiResolutionDataset(args.path, transform, args.size)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
@@ -849,5 +923,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project="guide 7")
 
-    train(args, loader, generator, discriminator, fine_generator, mpnet, vgg,
+    train(args, loader, generator, discriminator, fine_generator, mpnet,
           g_optim, d_optim, mp_optim, g_ema, device)
