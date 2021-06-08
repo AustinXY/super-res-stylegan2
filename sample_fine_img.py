@@ -8,9 +8,10 @@ from torch import nn, autograd, optim
 from torch.nn import functional as F
 from torchvision import transforms, utils
 
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
+# os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
-from model import G_NET
+# from model import G_NET
+from mixnmatch_model import G_NET
 from finegan_config import finegan_config
 
 
@@ -142,7 +143,7 @@ if __name__ == "__main__":
                                 args.b_dim, args.p_dim, args.c_dim, device)
         for i in range(args.n_sample):
             # p = manual_sample_codes(p, [i+10])
-            fine_img = fine_generator(z, b, p, c, z_fg=z_fg)
+            fine_img = fine_generator(z_fg, b, p, c, z_fg=z)
             # fine_img = fine_generator(z, b, p, c, rtn_img='pmk')
             img_li.append(fine_img)
             z_fg, b, p, c = rand_sample_codes(z_fg, b, p, c, rand_code=args.rand_code)

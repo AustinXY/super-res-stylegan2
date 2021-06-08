@@ -488,7 +488,7 @@ def train(args, loader, generator, discriminator, fine_generator, mknet, mpnet, 
             # same background
             bg_pdpx = 2
             fine_img = fine_generator(z, b, p, c)
-            fine_img1 = fine_generator(z, b, p, c1)
+            fine_img1 = fine_generator(z, b, p1, c1, z_fg=z1)
 
             wp_code = mpnet(fine_img)
             wp_code1 = mpnet(fine_img1)
@@ -984,7 +984,7 @@ if __name__ == "__main__":
         ]
     )
 
-    dataset = MultiResolutionDataset(args.path, transform, args.style_dim)
+    dataset = MultiResolutionDataset(args.path, transform, args.size)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

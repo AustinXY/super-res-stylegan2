@@ -47,6 +47,7 @@ def prepare(
 
     files = sorted(dataset.imgs, key=lambda x: x[0])
     files = [(i, file) for i, (file, label) in enumerate(files)]
+    files = files[0:10]
     total = 0
 
     with multiprocessing.Pool(n_worker) as pool:

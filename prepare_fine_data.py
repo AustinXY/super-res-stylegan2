@@ -49,7 +49,6 @@ def resize_and_convert(img, size, bbox, resample, quality=100):
 
         if image_transform is not None:
             img = image_transform(cimg)
-
     else:
         img = trans_fn.resize(img, size, resample)
         img = trans_fn.center_crop(img, size)
@@ -75,6 +74,7 @@ def resize_multiple(
 def resize_worker(img_file, sizes, resample):
     i, file = img_file
     img = Image.open(file)
+
     if filename_bbox is not None:
         bbox = filename_bbox[file]
 
@@ -91,13 +91,13 @@ def prepare(
 
     files = sorted(dataset.imgs, key=lambda x: x[0])
     files = [(i, file) for i, (file, label) in enumerate(files)]
+
     total = 0
 
     with multiprocessing.Pool(n_worker) as pool:
         for i, imgs in tqdm(pool.imap_unordered(resize_fn, files)):
             for size, img in zip(sizes, imgs):
                 key = f"{size}-{str(i).zfill(5)}".encode("utf-8")
-
                 with env.begin(write=True) as txn:
                     txn.put(key, img)
 
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--size",
         type=str,
-        default="128,256,512,1024",
+        default="128",
         help="resolutions of images for the dataset",
     )
     parser.add_argument("--resize", action="store_true", help="whether or not resize")
