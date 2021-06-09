@@ -391,17 +391,20 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
         style_img, latent = generator(noise, inject_index=args.injidx, return_latents=True)
+
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
         wp_code = mpnet(_style_img)
 
         if args.mp_nws == 2:
             latent = torch.cat((latent[:, 0:1], latent[:, args.injidx:args.injidx+1]), dim=1)
 
-        mp_loss = F.mse_loss(wp_code, latent) * args.mp
-        loss_dict["mp"] = mp_loss / args.mp
+        mp_loss = F.mse_loss(wp_code, latent)
+        mp_loss_ = mp_loss * args.mp
+
+        loss_dict["mp"] = mp_loss
 
         mpnet.zero_grad()
-        mp_loss.backward()
+        mp_loss_.backward()
         mp_optim.step()
 
         ############# guide disentangle #############
@@ -432,22 +435,17 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
             fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
 
-            wp_code_ = mpnet(fine_img)
-            wp_code1_ = mpnet(fine_img1)
+            wp_code = mpnet(fake_img)
+            wp_code1 = mpnet(fake_img1)
 
-            fg_w_loss = F.mse_loss(wp_code_[:, :, 0:args.fg_dim], wp_code1_[:, :, 0:args.fg_dim])
+            fg_w_loss = F.mse_loss(wp_code[:, :, 0:args.fg_dim], wp_code1[:, :, 0:args.fg_dim])
             fg_w_loss_ = fg_w_loss * args.guide_mse_fg
-
-            rec_loss = F.mse_loss(wp_code_, wp_code) + F.mse_loss(wp_code1_, wp_code1)
-            rec_loss_ = rec_loss * args.rec
-
-            loss = fg_w_loss_ + rec_loss_
 
             loss_dict["fg"] = fg_w_loss
 
             generator.zero_grad()
             mpnet.zero_grad()
-            loss.backward()
+            fg_w_loss_.backward()
             g_optim.step()
             mp_optim.step()
 
@@ -472,22 +470,17 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
             fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
 
-            wp_code_ = mpnet(fine_img)
-            wp_code1_ = mpnet(fine_img1)
+            wp_code = mpnet(fake_img)
+            wp_code1 = mpnet(fake_img1)
 
-            bg_w_loss = F.mse_loss(wp_code_[:, :, args.fg_dim:], wp_code1_[:, :, args.fg_dim:])
+            bg_w_loss = F.mse_loss(wp_code[:, :, args.fg_dim:], wp_code1[:, :, args.fg_dim:])
             bg_w_loss_ = bg_w_loss * args.guide_mse_bg
-
-            rec_loss = F.mse_loss(wp_code_, wp_code) + F.mse_loss(wp_code1_, wp_code1)
-            rec_loss_ = rec_loss * args.rec
-
-            loss = bg_w_loss_ + rec_loss_
 
             loss_dict["bg"] = bg_w_loss
 
             generator.zero_grad()
             mpnet.zero_grad()
-            loss.backward()
+            bg_w_loss_.backward()
             g_optim.step()
             mp_optim.step()
 
@@ -505,7 +498,6 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
         mp_loss_val = loss_reduced["mp"].item()
         bg_loss_val = loss_reduced["bg"].item()
         fg_loss_val = loss_reduced["fg"].item()
-
 
         if get_rank() == 0:
             pbar.set_description(
@@ -528,7 +520,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                         "Path Length": path_length_val,
                         "MP": mp_loss_val,
                         "FG code sim": fg_loss_val,
-                        "BG code sim": bg_loss_val
+                        "BG code sim": bg_loss_val,
                     }
                 )
 
@@ -554,6 +546,11 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
                     style_img2, _ = g_ema(style_z, inject_index=args.injidx)
+
+                    _style_img2 = F.interpolate(style_img2, size=(128, 128), mode='area')
+                    wp_code = mpnet(_style_img2)
+
+                    style_img3, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx)
 
                     utils.save_image(
                         style_img,
@@ -595,6 +592,14 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        style_img3,
+                        f"sample/{str(i).zfill(6)}_5.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
                     if wandb and args.wandb:
                         wandb.log(
                             {
@@ -603,10 +608,11 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                                 "ref image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                                 "change bg image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "rand sampled image recon": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_5.png").convert("RGB"))],
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 10000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -759,12 +765,10 @@ if __name__ == "__main__":
     parser.add_argument('--ds_name', type=str, default='STANFORDCAR',
                         help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
 
-    parser.add_argument("--kl_lambda", type=float, default=0.01)
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--guide_mse_fg", type=float, default=2, help="mse weight")
-    parser.add_argument("--guide_mse_bg", type=float, default=2, help="mse weight")
+    parser.add_argument("--guide_mse_fg", type=float, default=0.5, help="mse weight")
+    parser.add_argument("--guide_mse_bg", type=float, default=0.5, help="mse weight")
 
-    parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
     parser.add_argument("--rec", type=float, default=0.2, help="mse weight")
 
