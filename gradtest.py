@@ -8,14 +8,14 @@ os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 from numpy.core.fromnumeric import resize
 import dnnlib
-
+import seaborn as sn
 import numpy as np
 import torch
 from torch import nn, autograd, optim
 from torch.nn import functional as F
 from torch.utils import data
 import torch.distributed as dist
-from torchvision import transforms, utils
+from torchvision import transforms, utils, models
 from tqdm import tqdm
 from torch_utils import image_transforms
 from PIL import Image
@@ -320,114 +320,7 @@ def train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_opti
         mp_loss.backward()
         mp_optim.step()
 
-        ############# ############# #############
-        loss_reduced = reduce_loss_dict(loss_dict)
-        mp_loss_val = loss_reduced["mp"].mean().item()
-        mk_loss_val = loss_reduced["mk"].mean().item()
-        # bin_loss_val = loss_reduced["bin"].mean().item()
 
-        if get_rank() == 0:
-            pbar.set_description(
-                (
-                    f"mp: {mp_loss_val:.4f}; mk: {mk_loss_val:.4f}"
-                )
-            )
-
-            if wandb and args.wandb:
-                wandb.log(
-                    {
-                        "MP": mp_loss_val,
-                        "MK": mk_loss_val,
-                    }
-                )
-
-            # if i % 500 == 0:
-            #     with torch.no_grad():
-            #         mpnet.eval()
-            #         mknet.eval()
-
-            #         z, b, p, c = sample_codes(args.n_sample, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
-            #         if not args.tie_code:
-            #             z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
-
-            #         fine_img, _ = fine_generator(z, b, p, c)
-            #         wp_code = mpnet(fine_img)
-            #         rec_fine, _ = style_generator([wp_code], input_is_latent=True)
-
-            #         _rec_fine = F.interpolate(rec_fine, size=(128, 128), mode='area')
-
-            #         rec_mk = mknet(_rec_fine)
-
-            #         noise = mixing_noise(args.n_sample, args.latent, args.mixing, device)
-            #         style_img, _ = style_generator(noise, return_latents=True)
-            #         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-            #         wp_code = mpnet(_style_img)
-            #         rec_style, _ = style_generator([wp_code], input_is_latent=True)
-
-            #         utils.save_image(
-            #             fine_img,
-            #             f"sample/{str(i).zfill(6)}_0.png",
-            #             nrow=8,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-
-            #         utils.save_image(
-            #             rec_fine,
-            #             f"sample/{str(i).zfill(6)}_1.png",
-            #             nrow=8,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-
-            #         utils.save_image(
-            #             rec_mk,
-            #             f"sample/{str(i).zfill(6)}_2.png",
-            #             nrow=8,
-            #             normalize=True,
-            #             range=(0, 1),
-            #         )
-
-            #         utils.save_image(
-            #             style_img,
-            #             f"sample/{str(i).zfill(6)}_3.png",
-            #             nrow=8,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-
-            #         utils.save_image(
-            #             rec_style,
-            #             f"sample/{str(i).zfill(6)}_4.png",
-            #             nrow=8,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-            #         if wandb and args.wandb:
-            #             wandb.log(
-            #                 {
-            #                     "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-            #                     "recon fine": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
-            #                     "recon mask": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
-            #                     "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
-            #                     "recon style": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
-            #                 }
-            #             )
-
-            if i % 40000 == 0 and i != args.start_iter:
-                torch.save(
-                    {
-                        "style_g": style_g_module.state_dict(),
-                        "fine": fine_g_module.state_dict(),
-                        "mp": mp_module.state_dict(),
-                        "mk": mk_module.state_dict(),
-                        "mp_optim": mp_optim.state_dict(),
-                        "mk_optim": mk_optim.state_dict(),
-                        "args": args,
-                        "cur_iter": i,
-                    },
-                    f"checkpoint/{str(i).zfill(6)}_1_.pt",
-                )
 
 
 if __name__ == "__main__":
@@ -580,7 +473,7 @@ if __name__ == "__main__":
         # args.start_iter = ckpt['cur_iter']
 
         # mpnet.load_state_dict(ckpt["mp"])
-        # mknet.load_state_dict(ckpt["mk"])
+        mknet.load_state_dict(ckpt["mk"])
 
         if args.style_model is None:
             style_generator.load_state_dict(ckpt["style_g"])
@@ -597,42 +490,59 @@ if __name__ == "__main__":
         style_generator.load_state_dict(style_dict["g_ema"])
         # d_optim.load_state_dict(style_dict["d_optim"])
 
-    # if specify finegan checkpoint, overwrite finegan from ckpt
-    if args.fine_model is not None:
-        print("load fine model:", args.fine_model)
-        fine_dict = torch.load(args.fine_model, map_location=lambda storage, loc: storage)
-        fine_generator.load_state_dict(fine_dict)
+    with torch.no_grad():
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        style_img, latent_ = style_generator(
+            noise, return_latents=True, randomize_noise=False)
 
-    if args.distributed:
-        style_generator = nn.parallel.DistributedDataParallel(
-            style_generator,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
+    noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
-        fine_generator = nn.parallel.DistributedDataParallel(
-            fine_generator,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
+    style_img, latent = style_generator(noise, return_latents=True, randomize_noise=False)
+    style_img_ = F.interpolate(style_img, size=(128, 128), mode='area')
 
-        mpnet = nn.parallel.DistributedDataParallel(
-            mpnet,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
+    mask = mknet(style_img_)
 
-        mknet = nn.parallel.DistributedDataParallel(
-            mknet,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
+    grad1, = autograd.grad(
+        outputs=(style_img_ * mask).sum(), inputs=latent, create_graph=True
+    )
 
-    if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="map net style distribute")
+    # bgmk = torch.ones_like(mask)-mask
+    # grad2, = autograd.grad(
+    #     outputs=(style_img_ * bgmk).sum(), inputs=latent, create_graph=True
+    # )
+    # grad3, = autograd.grad(
+    #     outputs=(style_img).sum(), inputs=latent, create_graph=True
+    # )
+    with torch.no_grad():
+        m = torch.max(torch.abs(grad1[0]))
+        alt_latent = torch.where(torch.abs(grad1) < m/3, latent, latent_)
+        print(torch.mean(F.mse_loss(latent, alt_latent, reduction='none'), dim=(-1,-2)))
+        style_img1, _ = style_generator([alt_latent], input_is_latent=True, randomize_noise=False)
+        print(alt_latent.size())
 
-    train(args, fine_generator, style_generator, mpnet, mknet, mp_optim, mk_optim, device)
+    utils.save_image(
+        style_img,
+        f"t1.png",
+        nrow=8,
+        normalize=True,
+        range=(-1, 1),
+    )
+    utils.save_image(
+        style_img1,
+        f"t0.png",
+        nrow=8,
+        normalize=True,
+        range=(-1, 1),
+    )
+    utils.save_image(
+        mask,
+        f"t2.png",
+        nrow=8,
+        normalize=True,
+        range=(0, 1),
+    )
+
+    svm = sn.heatmap(grad1[0].detach().cpu().numpy(), cmap='coolwarm')
+    figure = svm.get_figure()
+    figure.savefig('t3.png', dpi=400)
+
