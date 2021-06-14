@@ -27,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import Generator, Discriminator, Encoder, ALIEncoder
+from model import Generator, Discriminator, Encoder, W_Discriminator
 from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
@@ -243,7 +243,8 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim, d_optim, mp_optim, g_ema, device):
+def train(args, loader, generator, discriminator, fine_generator, mpnet, w_discriminator,
+          g_optim, d_optim, mp_optim, wd_optim, g_ema, device):
     loader = sample_data(loader)
 
     pbar = range(args.iter)
@@ -267,11 +268,13 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
         d_module = discriminator.module
         mp_module = mpnet.module
         fine_module = fine_generator.module
+        wd_module = w_discriminator.module
     else:
         g_module = generator
         d_module = discriminator
         mp_module = mpnet
         fine_module = fine_generator
+        wd_module = w_discriminator
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -396,27 +399,70 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+        ############# train code discriminator #############
+        requires_grad(mpnet, False)
+        requires_grad(w_discriminator, True)
+
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        real_latent = g_module.get_latent(noise)
+
+        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if not args.tie_code:
+            z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+        fine_img = fine_generator(z, b, p, c)
+        fake_latent = mpnet(fine_img)
+
+        fake_pred = w_discriminator(fake_latent)
+        real_pred = w_discriminator(real_latent)
+        d_loss = d_logistic_loss(real_pred, fake_pred)
+
+        loss_dict["wd"] = d_loss
+
+        w_discriminator.zero_grad()
+        d_loss.backward()
+        wd_optim.step()
+
         ############# train mapping network #############
         requires_grad(mpnet, True)
-        requires_grad(generator, True)
+        requires_grad(generator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
         style_img, _ = generator(noise, inject_index=args.injidx)
+        latent = g_module.get_latent(noise)
 
         _style_img = F.interpolate(style_img, size=(128, 128), mode='area')
-        noise_ = mpnet(_style_img)
+        latent_ = mpnet(_style_img)
 
-        mp_loss = F.mse_loss(noise_, torch.transpose(noise, 0, 1))
+        mp_loss = F.mse_loss(latent_, latent)
         mp_loss_ = mp_loss * args.mp
 
         loss_dict["mp"] = mp_loss
 
         mpnet.zero_grad()
-        generator.zero_grad()
         mp_loss_.backward()
         mp_optim.step()
-        g_optim.step()
+
+
+        ############# train mapping network #############
+        requires_grad(mpnet, True)
+        requires_grad(w_discriminator, False)
+
+        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if not args.tie_code:
+            z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+        fine_img = fine_generator(z, b, p, c)
+        fake_latent = mpnet(fine_img)
+
+        fake_pred = w_discriminator(fake_latent)
+        g_loss = g_nonsaturating_loss(fake_pred)
+
+        loss_dict["wg"] = g_loss
+
+        mpnet.zero_grad()
+        g_loss.backward()
+        mp_optim.step()
+
 
         # ############# guide disentangle #############
         # requires_grad(mpnet, True)
@@ -507,6 +553,8 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
 
         d_loss_val = loss_reduced["d"].mean().item()
         g_loss_val = loss_reduced["g"].mean().item()
+        wd_loss_val = loss_reduced["wd"].mean().item()
+        wg_loss_val = loss_reduced["wg"].mean().item()
         r1_val = loss_reduced["r1"].mean().item()
         path_loss_val = loss_reduced["path"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
@@ -530,6 +578,8 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                     {
                         "Generator": g_loss_val,
                         "Discriminator": d_loss_val,
+                        "WGenerator": wg_loss_val,
+                        "WDiscriminator": wd_loss_val,
                         "Path Length Regularization": path_loss_val,
                         "Mean Path Length": mean_path_length,
                         "Real Score": real_score_val,
@@ -652,7 +702,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 10000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -667,7 +717,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_7_1.pt",
+                    f"checkpoint/{str(i).zfill(6)}_7_2.pt",
                 )
 
 
@@ -866,8 +916,12 @@ if __name__ == "__main__":
 
     fine_generator = G_NET(ds_name=args.ds_name).to(device)
 
+    w_discriminator = W_Discriminator(
+        num_ws=args.mp_nws,
+        w_dim=args.latent
+    ).to(device)
 
-    mpnet = ALIEncoder(
+    mpnet = Encoder(
         size=128,
         num_ws=args.mp_nws,
         w_dim=args.latent
@@ -875,6 +929,12 @@ if __name__ == "__main__":
 
     mp_optim = optim.Adam(
         mpnet.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
+
+    wd_optim = optim.Adam(
+        w_discriminator.parameters(),
         lr=args.lr,
         betas=(0, 0.99),
     )
@@ -905,12 +965,12 @@ if __name__ == "__main__":
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
-        # mpnet.load_state_dict(ckpt['mp'])
+        mpnet.load_state_dict(ckpt['mp'])
         fine_generator.load_state_dict(ckpt["fine"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
-        # mp_optim.load_state_dict(ckpt["mp_optim"])
+        mp_optim.load_state_dict(ckpt["mp_optim"])
 
     if args.fine_ckpt is not None:
         print("load fine model:", args.fine_ckpt)
@@ -937,6 +997,14 @@ if __name__ == "__main__":
 
         discriminator = nn.parallel.DistributedDataParallel(
             discriminator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=True
+        )
+
+        w_discriminator = nn.parallel.DistributedDataParallel(
+            w_discriminator,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -978,7 +1046,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 7_1")
+        wandb.init(project="guide 7_2")
 
-    train(args, loader, generator, discriminator, fine_generator, mpnet,
-          g_optim, d_optim, mp_optim, g_ema, device)
+    train(args, loader, generator, discriminator, fine_generator, mpnet, w_discriminator,
+          g_optim, d_optim, mp_optim, wd_optim, g_ema, device)

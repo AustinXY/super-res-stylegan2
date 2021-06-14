@@ -228,7 +228,7 @@ class ModulatedConv2d(nn.Module):
             f"upsample={self.upsample}, downsample={self.downsample})"
         )
 
-    def forward(self, input, style):
+    def forward(self, input, style, input_is_ssc=False):
         batch, in_channel, height, width = input.shape
 
         if not self.fused:
@@ -262,7 +262,11 @@ class ModulatedConv2d(nn.Module):
 
             return out
 
-        style = self.modulation(style).view(batch, 1, in_channel, 1, 1)
+        if not input_is_ssc:
+            style = self.modulation(style).view(batch, 1, in_channel, 1, 1)
+        else:
+            style = style.view(batch, 1, in_channel, 1, 1)
+
         weight = self.scale * self.weight * style
 
         if self.demodulate:
@@ -306,7 +310,7 @@ class ModulatedConv2d(nn.Module):
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
 
-        return out
+        return out, style.view(batch, 1, in_channel)
 
 
 class NoiseInjection(nn.Module):
@@ -375,13 +379,13 @@ class StyledConv(nn.Module):
         # self.activate = ScaledLeakyReLU(0.2)
         self.activate = FusedLeakyReLU(out_channel)
 
-    def forward(self, input, style, noise=None):
-        out = self.conv(input, style)
+    def forward(self, input, style, noise=None, input_is_ssc=False):
+        out, s = self.conv(input, style, input_is_ssc=input_is_ssc)
         out = self.noise(out, noise=noise)
         # out = out + self.bias
         out = self.activate(out)
 
-        return out
+        return out, s
 
 
 class ToRGB(nn.Module):
@@ -395,8 +399,8 @@ class ToRGB(nn.Module):
             in_channel, 3, 1, style_dim, demodulate=False)
         self.bias = nn.Parameter(torch.zeros(1, 3, 1, 1))
 
-    def forward(self, input, style, skip=None):
-        out = self.conv(input, style)
+    def forward(self, input, style, skip=None, input_is_ssc=False):
+        out, s = self.conv(input, style, input_is_ssc=input_is_ssc)
         out = out + self.bias
 
         if skip is not None:
@@ -404,7 +408,7 @@ class ToRGB(nn.Module):
 
             out = out + skip
 
-        return out
+        return out, s
 
 
 class Generator(nn.Module):
@@ -441,7 +445,8 @@ class Generator(nn.Module):
             16: 512,
             32: 512,
             64: 256 * channel_multiplier,
-            128: 128 * channel_multiplier,
+            # 128: 128 * channel_multiplier,
+            128: 256 * channel_multiplier,
             256: 64 * channel_multiplier,
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
@@ -526,8 +531,7 @@ class Generator(nn.Module):
         return latent
 
     def get_latent(self, input):
-        return self.style(input)
-        # return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
+        return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
 
     def forward(
         self,
@@ -539,8 +543,10 @@ class Generator(nn.Module):
         input_is_latent=False,
         noise=None,
         randomize_noise=True,
+        input_is_ssc=False,
+        return_ssc=False
     ):
-        if not input_is_latent:
+        if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
 
         if noise is None:
@@ -562,7 +568,7 @@ class Generator(nn.Module):
 
             styles = style_t
 
-        if not input_is_latent:
+        if (not input_is_latent) and (not input_is_ssc):
             if len(styles) < 2:
                 inject_index = self.n_latent
                 latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
@@ -578,7 +584,7 @@ class Generator(nn.Module):
                 latent = torch.cat([latent, latent2], 1)
 
         # input is latent
-        else:
+        elif input_is_latent:
             if styles.size(1) == 1:
                 inject_index = self.n_latent
                 latent = styles.repeat(1, inject_index, 1)
@@ -596,28 +602,55 @@ class Generator(nn.Module):
             else:
                 latent = styles
 
+        # input is stylespace code
+        elif input_is_ssc:
+            latent = styles
+
         out = self.input(latent)
-        out = self.conv1(out, latent[:, 0], noise=noise[0])
 
-        skip = self.to_rgb1(out, latent[:, 1])
+        ssc = []
+        out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
+        ssc.append(s)
 
-        i = 1
-        for conv1, conv2, noise1, noise2, to_rgb in zip(
-            self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
-        ):
-            out = conv1(out, latent[:, i], noise=noise1)
-            out = conv2(out, latent[:, i + 1], noise=noise2)
-            skip = to_rgb(out, latent[:, i + 2], skip)
+        skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
+        ssc.append(s)
 
-            i += 2
+        if not input_is_ssc:
+            i = 1
+            for conv1, conv2, noise1, noise2, to_rgb in zip(
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+            ):
+                out, s = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+                out, s = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+                skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+
+                i += 2
+
+            ssc = torch.cat(ssc, dim=1)
+
+        else:
+            i = 2
+            for conv1, conv2, noise1, noise2, to_rgb in zip(
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+            ):
+                out, _ = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
+                out, _ = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                skip, _ = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+
+                i += 3
 
         image = skip
 
         if return_latents:
             return image, latent
 
-        else:
-            return image, None
+        if return_ssc:
+            return image, ssc
+
+        return image, None
 
 
 class ConvLayer(nn.Sequential):
@@ -1633,3 +1666,88 @@ class _Encoder(nn.Module):
         batch = input.size(0)
         out = self.convs(input)
         return out.view(batch, self.n_latents, self.w_dim)
+
+
+class W_Discriminator(nn.Module):
+    def __init__(self, num_ws, w_dim):
+        super().__init__()
+        self.num_ws = num_ws
+        self.w_dim = w_dim
+        full_dim = num_ws * w_dim
+        self.full_dim = full_dim
+
+        self.fc = nn.Sequential(
+            EqualLinear(full_dim, full_dim, activation="fused_lrelu"),
+            EqualLinear(full_dim, full_dim//4, activation="fused_lrelu"),
+            EqualLinear(full_dim//4, full_dim//16, activation="fused_lrelu"),
+            EqualLinear(full_dim//16, full_dim//32, activation="fused_lrelu"),
+            EqualLinear(full_dim//32, 1))
+
+    def forward(self, w):
+        out = self.fc(w.view(-1, self.full_dim))
+        return out
+
+
+class ALIEncoder(nn.Module):
+    def __init__(self, size, num_ws, w_dim, noise=False):
+        super().__init__()
+        self.w_dim = w_dim
+        self.num_ws = num_ws
+
+        if noise:
+            self.latent_size *= 2
+
+        self.main1 = nn.Sequential(
+            nn.Conv2d(3, 32, 5, stride=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(32, 64, 4, stride=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(64, 128, 4, stride=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(128, 256, 4, stride=2, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(256, 512, 4, stride=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(512, 512, 4, stride=2, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(512, 512, 4, stride=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(512, 512, 4, stride=2, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv2d(512, 512, 3, stride=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(inplace=True),
+        )
+
+        self.main3 = nn.Sequential(
+            nn.Conv2d(512, 512, 1, stride=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(inplace=True)
+        )
+
+        self.main4 = nn.Sequential(
+            nn.Conv2d(512, w_dim*num_ws, 1, stride=1, bias=True)
+        )
+
+    def forward(self, input):
+        batch_size = input.size()[0]
+        x1 = self.main1(input)
+        x3 = self.main3(x1)
+        output = self.main4(x3)
+        return output.view(-1, self.num_ws, self.w_dim)

@@ -27,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import UNet, Generator, Discriminator, Encoder
+from model import Generator, Discriminator, Encoder, W_Discriminator
 from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
@@ -259,7 +259,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
     else:
         g_module = generator
         d_module = discriminator
-        mp_modle = mpnet
+        mp_module = mpnet
         fine_module = fine_generator
 
     accum = 0.5 ** (32 / (10 * 1000))
@@ -285,6 +285,112 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
         real_img = next(loader)
         real_img = real_img.to(device)
         mpnet.train()
+
+
+        ### test
+
+        # utils.save_image(
+        #     real_img,
+        #     f"tt.png",
+        #     nrow=8,
+        #     normalize=True,
+        #     range=(-1, 1),
+        # )
+
+        # z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        # if not args.tie_code:
+        #     z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
+
+        # z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
+
+        # fine_img = fine_generator(z, b, p, c)
+        # fine_img1 = fine_generator(z1, b1, p, c, z_fg=z)
+        # wp_code = mpnet(fine_img)
+        # wp_code1 = mpnet(fine_img1)
+        # fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx)
+        # fake_img1, _ = generator(wp_code1, input_is_latent=True, inject_index=args.injidx)
+
+        # wp_code = mpnet(fine_img)
+        # wp_code1 = mpnet(fine_img1)
+        # print(F.mse_loss(wp_code[:, :, 0:args.fg_dim], wp_code1[:, :, 0:args.fg_dim]))
+
+        # print(wp_code)
+        # print(wp_code1)
+
+        # fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx)
+        # fake_img1, _ = generator(wp_code1, input_is_latent=True, inject_index=args.injidx)
+
+        # wp_code2 = torch.cat((wp_code[:,:,0:args.fg_dim], wp_code1[:,:,args.fg_dim:]), dim=2)
+        # wp_code3 = torch.cat((wp_code1[:,:,0:args.fg_dim], wp_code[:,:,args.fg_dim:]), dim=2)
+
+        # fake_img2, _ = generator(wp_code2, input_is_latent=True, inject_index=args.injidx)
+        # fake_img3, _ = generator(wp_code3, input_is_latent=True, inject_index=args.injidx)
+
+
+        # # same foreground
+        # fine_img = fine_generator(z, b, p, c)
+        # wp_code = mpnet(fine_img)
+        # fake_img, _ = generator(wp_code, input_is_latent=True, inject_index=args.injidx)
+        # print(torch.mean(wp_code))
+        # print(torch.std(wp_code))
+
+        # noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
+        # noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
+        # fake_img1, latent1 = generator(noise1, return_latents=True, inject_index=args.injidx)
+        # fake_img2, latent2 = generator(noise2, return_latents=True, inject_index=args.injidx)
+
+        # latent3 = torch.cat((latent1[:,:,0:args.fg_dim], latent2[:,:,args.fg_dim:]), dim=2)
+        # latent4 = torch.cat((latent2[:,:,0:args.fg_dim], latent1[:,:,args.fg_dim:]), dim=2)
+
+        # fake_img3, _ = generator(latent3, input_is_latent=True, inject_index=args.injidx)
+        # fake_img4, _ = generator(latent4, input_is_latent=True, inject_index=args.injidx)
+
+        # latent1 = torch.cat((latent1[:, 0:1], latent1[:, args.injidx:args.injidx+1]), dim=1)
+        # latent1_ = mpnet(fake_img1)
+        # print(F.mse_loss(latent1, latent1_))
+        # print(torch.mean(latent))
+        # print(torch.std(latent))
+
+        # utils.save_image(
+        #     fake_img,
+        #     f"t0.png",
+        #     nrow=8,
+        #     normalize=True,
+        #     range=(-1, 1),
+        # )
+        # utils.save_image(
+        #     fake_img1,
+        #     f"t1.png",
+        #     nrow=8,
+        #     normalize=True,
+        #     range=(-1, 1),
+        # )
+        # utils.save_image(
+        #     fake_img2,
+        #     f"t2.png",
+        #     nrow=8,
+        #     normalize=True,
+        #     range=(-1, 1),
+        # )
+        # utils.save_image(
+        #     fake_img3,
+        #     f"t3.png",
+        #     nrow=8,
+        #     normalize=True,
+        #     range=(-1, 1),
+        # )
+        # utils.save_image(
+        #     fine_img,
+        #     f"t4.png",
+        #     nrow=8,
+        #     normalize=True,
+        #     range=(-1, 1),
+        # )
+
+        # sys.exit()
+
+        #######################
+
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -435,10 +541,22 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
             fake_img = F.interpolate(fake_img, size=(128, 128), mode='area')
             fake_img1 = F.interpolate(fake_img1, size=(128, 128), mode='area')
 
-            wp_code = mpnet(fake_img)
-            wp_code1 = mpnet(fake_img1)
+            wp_code_ = mpnet(fake_img)
+            wp_code1_ = mpnet(fake_img1)
 
             fg_w_loss = F.mse_loss(wp_code[:, :, 0:args.fg_dim], wp_code1[:, :, 0:args.fg_dim])
+
+            ## test
+            print(fg_w_loss)
+
+            print(torch.mean(wp_code))
+            print(torch.std(wp_code))
+
+            sys.exit()
+
+            #######
+
+
             fg_w_loss_ = fg_w_loss * args.guide_mse_fg
 
             loss_dict["fg"] = fg_w_loss
@@ -460,7 +578,7 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                 z1, b1, p1, c1 = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['z', 'b', 'p', 'c'])
 
                 fine_img = fine_generator(z, b, p, c)
-                fine_img1 = fine_generator(z, b, p, c1, z_fg=z)
+                fine_img1 = fine_generator(z, b, p1, c1, z_fg=z1)
                 wp_code = mpnet(fine_img)
                 wp_code1 = mpnet(fine_img1)
 
@@ -545,12 +663,18 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                     style_img1, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx, noise=noises)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, _ = g_ema(style_z, inject_index=args.injidx)
+                    style_img2, latent1 = g_ema(style_z, return_latents=True, inject_index=args.injidx)
+
+                    style_z1 = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img3, latent2 = g_ema(style_z1, return_latents=True, inject_index=args.injidx)
+
+                    latent3 = torch.cat((latent1[:,:,0:args.fg_dim], latent2[:,:,args.fg_dim:]), dim=2)
+                    style_img4, _ = g_ema(latent3, input_is_latent=True, inject_index=args.injidx)
 
                     _style_img2 = F.interpolate(style_img2, size=(128, 128), mode='area')
                     wp_code = mpnet(_style_img2)
 
-                    style_img3, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx)
+                    style_img5, _ = g_ema(wp_code, input_is_latent=True, inject_index=args.injidx)
 
                     utils.save_image(
                         style_img,
@@ -593,13 +717,28 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                     )
 
                     utils.save_image(
-                        style_img3,
+                        style_img5,
                         f"sample/{str(i).zfill(6)}_5.png",
                         nrow=8,
                         normalize=True,
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        style_img3,
+                        f"sample/{str(i).zfill(6)}_6.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        style_img4,
+                        f"sample/{str(i).zfill(6)}_7.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
                     if wandb and args.wandb:
                         wandb.log(
                             {
@@ -608,11 +747,13 @@ def train(args, loader, generator, discriminator, fine_generator, mpnet, g_optim
                                 "ref image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                                 "change bg image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "rand sampled image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "rand sampled image1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_6.png").convert("RGB"))],
+                                "rand sampled concat": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_7.png").convert("RGB"))],
                                 "rand sampled image recon": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_5.png").convert("RGB"))],
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 20000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -766,11 +907,10 @@ if __name__ == "__main__":
                         help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
 
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--guide_mse_fg", type=float, default=0.5, help="mse weight")
-    parser.add_argument("--guide_mse_bg", type=float, default=0.5, help="mse weight")
+    parser.add_argument("--guide_mse_fg", type=float, default=10, help="mse weight")
+    parser.add_argument("--guide_mse_bg", type=float, default=10, help="mse weight")
 
-    parser.add_argument("--mp", type=float, default=1, help="mse weight")
-    parser.add_argument("--rec", type=float, default=0.2, help="mse weight")
+    parser.add_argument("--mp", type=float, default=5, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
