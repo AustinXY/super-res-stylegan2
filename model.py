@@ -544,7 +544,8 @@ class Generator(nn.Module):
         noise=None,
         randomize_noise=True,
         input_is_ssc=False,
-        return_ssc=False
+        return_ssc=False,
+        return_img_only=False,
     ):
         if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
@@ -643,6 +644,9 @@ class Generator(nn.Module):
                 i += 3
 
         image = skip
+
+        if return_img_only:
+            return image
 
         if return_latents:
             return image, latent
