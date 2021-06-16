@@ -385,7 +385,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         if guide_regularize:
             # pass
             with torch.no_grad():
-                noise = mixing_noise(args.batch//4, args.latent, args.mixing, device)
+                noise = mixing_noise(args.batch, args.latent, args.mixing, device)
                 latent = g_module.get_latent(noise)
 
             v_fg = torch.zeros_like(latent)
@@ -393,12 +393,14 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             img1, j_fg = autograd.functional.jvp(lambda x: generator(
             x, input_is_latent=True, return_img_only=True), latent, v=v_fg, create_graph=True)
+            j_fg = torch.sum(torch.abs(j_fg), dim=1)
 
             v_bg = torch.zeros_like(latent)
             v_bg[:, :, args.fg_dim:] = 1
 
             img2, j_bg = autograd.functional.jvp(lambda x: generator(
             x, input_is_latent=True, return_img_only=True), latent, v=v_bg, create_graph=True)
+            j_bg = torch.sum(torch.abs(j_bg), dim=1)
 
             disent_loss = torch.mean(j_fg * j_bg) + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
             disent_loss_ = disent_loss * args.dis
@@ -421,8 +423,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        # dis_loss_val = loss_reduced["dis"].item()
-        dis_loss_val = 0
+        dis_loss_val = loss_reduced["dis"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -582,7 +583,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--guide_reg_every",
         type=int,
-        default=4,
+        default=1,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
