@@ -4,7 +4,7 @@ import random
 import os
 import gc
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 import numpy as np
 import torch
@@ -401,7 +401,7 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
         ############# train mapping network #############
         requires_grad(fine2style, True)
         requires_grad(style2fine, True)
-        requires_grad(generator, False)
+        requires_grad(generator, True)
 
         z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
         if not args.tie_code:
@@ -414,14 +414,15 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
 
         rec_fine_img = style2fine(style_img)
 
-        z_loss = torch.mean(style_z) + torch.abs(torch.std(style_z) - 1)
+        z_loss = torch.abs(torch.mean(style_z)) + torch.abs(torch.std(style_z) - 1)
 
         rec_loss = F.mse_loss(rec_fine_img, fine_img)
-        loss = z_loss + rec_loss
+        loss = z_loss + rec_loss * 5
 
         loss_dict["mean"] = torch.mean(style_z)
         loss_dict["std"] = torch.std(style_z)
         loss_dict["rec"] = rec_loss
+        loss_dict["z"] = z_loss
 
         fine2style.zero_grad()
         style2fine.zero_grad()
@@ -442,11 +443,12 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
         mean_loss_val = loss_reduced["mean"].item()
         std_loss_val = loss_reduced["std"].item()
         rec_loss_val = loss_reduced["rec"].item()
+        z_loss_val = loss_reduced["z"].item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; z: {z_loss_val:.4f}; r1: {r1_val:.4f}; "
                     f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"augment: {ada_aug_p:.4f}"
                 )
