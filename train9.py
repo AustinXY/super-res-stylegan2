@@ -414,13 +414,13 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
 
         rec_fine_img = style2fine(style_img)
 
-        fake_pred = discriminator(style_img)
-        g_loss = g_nonsaturating_loss(fake_pred)
+        z_loss = torch.mean(style_z) + torch.abs(torch.std(style_z) - 1)
 
         rec_loss = F.mse_loss(rec_fine_img, fine_img)
-        loss = g_loss + rec_loss
+        loss = z_loss + rec_loss
 
-        loss_dict["rec_g"] = g_loss
+        loss_dict["mean"] = torch.mean(style_z)
+        loss_dict["std"] = torch.std(style_z)
         loss_dict["rec"] = rec_loss
 
         fine2style.zero_grad()
@@ -439,7 +439,8 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        recg_loss_val = loss_reduced["rec_g"].item()
+        mean_loss_val = loss_reduced["mean"].item()
+        std_loss_val = loss_reduced["std"].item()
         rec_loss_val = loss_reduced["rec"].item()
 
         if get_rank() == 0:
@@ -461,7 +462,8 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "Fine2style Adv": recg_loss_val,
+                        "Mean Z": mean_loss_val,
+                        "Std Z": std_loss_val,
                         "Reconstruction": rec_loss_val,
                     }
                 )
@@ -596,12 +598,6 @@ if __name__ == "__main__":
         default=4,
         help="interval of the applying path length regularization",
     )
-    # parser.add_argument(
-    #     "--mse_reg_every",
-    #     type=int,
-    #     default=10,
-    #     help="interval of the applying path length regularization",
-    # )
     parser.add_argument(
         "--guide_reg_every",
         type=int,
