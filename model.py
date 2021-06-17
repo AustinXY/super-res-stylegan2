@@ -333,8 +333,7 @@ class ConstantInput(nn.Module):
 
         self.input = nn.Parameter(torch.randn(1, channel, size, size))
 
-    def forward(self, input):
-        batch = input.shape[0]
+    def forward(self, batch):
         out = self.input.repeat(batch, 1, 1, 1)
 
         return out
@@ -445,8 +444,7 @@ class Generator(nn.Module):
             16: 512,
             32: 512,
             64: 256 * channel_multiplier,
-            # 128: 128 * channel_multiplier,
-            128: 256 * channel_multiplier,
+            128: 128 * channel_multiplier,
             256: 64 * channel_multiplier,
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
@@ -607,16 +605,19 @@ class Generator(nn.Module):
         elif input_is_ssc:
             latent = styles
 
-        out = self.input(latent)
-
-        ssc = []
-        out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
-        ssc.append(s)
-
-        skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
-        ssc.append(s)
 
         if not input_is_ssc:
+            ssc = []
+
+            batch = latent.size(0)
+
+            out = self.input(batch)
+            out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
+            ssc.append(s)
+
+            skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
+            ssc.append(s)
+
             i = 1
             for conv1, conv2, noise1, noise2, to_rgb in zip(
                 self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
@@ -630,18 +631,24 @@ class Generator(nn.Module):
 
                 i += 2
 
-            ssc = torch.cat(ssc, dim=1)
-
         else:
+            batch = latent[0].size(0)
+
+            out = self.input(batch)
+            out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
+            skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
+
             i = 2
             for conv1, conv2, noise1, noise2, to_rgb in zip(
                 self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
             ):
-                out, _ = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
-                out, _ = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
-                skip, _ = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+                out, _ = conv1(out, latent[i], noise=noise1, input_is_ssc=input_is_ssc)
+                out, _ = conv2(out, latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
 
                 i += 3
+
+            ssc = latent
 
         image = skip
 
@@ -1198,13 +1205,16 @@ class Encoder(nn.Module):
             EqualLinear(channels[4] * 4 * 4, channels[4] * self.n_latents, activation="fused_lrelu"),
             EqualLinear(channels[4] * self.n_latents, self.w_dim * self.n_latents))
 
-    def forward(self, input, return_li=True):
+    def forward(self, input, return_li=True, n_first=False):
         batch = input.size(0)
         out = self.convs(input)
         out = self.final_linear(out.view(batch, -1))
         # if use_sigmoid:
         # out = torch.tanh(out) * 5
-        return out.view(batch, self.n_latents, self.w_dim)
+        out = out.view(batch, self.n_latents, self.w_dim)
+        if n_first:
+            return out.transpose(0, 1)
+        return out
 
         if self.n_latents > 1:
             if return_li:
@@ -1690,68 +1700,3 @@ class W_Discriminator(nn.Module):
     def forward(self, w):
         out = self.fc(w.view(-1, self.full_dim))
         return out
-
-
-class ALIEncoder(nn.Module):
-    def __init__(self, size, num_ws, w_dim, noise=False):
-        super().__init__()
-        self.w_dim = w_dim
-        self.num_ws = num_ws
-
-        if noise:
-            self.latent_size *= 2
-
-        self.main1 = nn.Sequential(
-            nn.Conv2d(3, 32, 5, stride=1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(32, 64, 4, stride=2, bias=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(64, 128, 4, stride=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(128, 256, 4, stride=2, bias=False),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(256, 512, 4, stride=1, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(512, 512, 4, stride=2, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(512, 512, 4, stride=1, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(512, 512, 4, stride=2, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Conv2d(512, 512, 3, stride=1, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True),
-        )
-
-        self.main3 = nn.Sequential(
-            nn.Conv2d(512, 512, 1, stride=1, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(inplace=True)
-        )
-
-        self.main4 = nn.Sequential(
-            nn.Conv2d(512, w_dim*num_ws, 1, stride=1, bias=True)
-        )
-
-    def forward(self, input):
-        batch_size = input.size()[0]
-        x1 = self.main1(input)
-        x3 = self.main3(x1)
-        output = self.main4(x3)
-        return output.view(-1, self.num_ws, self.w_dim)

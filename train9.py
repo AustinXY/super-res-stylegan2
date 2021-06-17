@@ -3,7 +3,7 @@ import math
 import random
 import os
 import gc
-import copy
+
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
@@ -27,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import UNet, Generator, Discriminator, Encoder
+from model import Generator, Discriminator, Encoder, UNet
 from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
@@ -107,11 +107,22 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
 
 def make_noise(batch, latent_dim, n_noise, device):
     # if n_noise == 1:
-    #     return torch.randn(1, batch, latent_dim, device=device)
+    #     noises = torch.randn(1, batch, latent_dim, device=device)
+    #     noises = torch.cat((noises, noises), dim=0)
+    #     return noises
 
     noises = torch.randn(n_noise, batch, latent_dim, device=device)
 
     return noises
+
+# def make_noise(batch, latent_dim, n_noise, device):
+#     if n_noise == 1:
+#         noises = torch.randn(batch, 1, latent_dim, device=device)
+#         noises = torch.cat((noises, noises), dim=1)
+#         return noises
+
+#     noises = torch.randn(batch, n_noise, latent_dim, device=device)
+#     return noises
 
 
 def mixing_noise(batch, latent_dim, prob, device):
@@ -232,12 +243,7 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-def generate(*ssc):
-    ssc = [s for s in ssc]
-    img, _ = generator(ssc, input_is_ssc=True)
-    return img
-
-def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
+def train(args, loader, generator, discriminator, fine_generator, fine2style, style2fine, g_optim, d_optim, cog_optim, g_ema, device):
     loader = sample_data(loader)
 
     pbar = range(args.iter)
@@ -259,9 +265,15 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
     if args.distributed:
         g_module = generator.module
         d_module = discriminator.module
+        f2s_module = fine2style.module
+        s2f_module = style2fine.module
+        fine_module = fine_generator.module
     else:
         g_module = generator
         d_module = discriminator
+        f2s_module = fine2style
+        s2f_module = style2fine
+        fine_module = fine_generator
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -270,6 +282,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(
             args.ada_target, args.ada_length, 8, device)
+
+    fine_generator.eval()
+    requires_grad(fine_generator, False)
 
     # args.injidx = None
 
@@ -282,6 +297,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         real_img = next(loader)
         real_img = real_img.to(device)
+        fine2style.train()
+        style2fine.train()
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -365,7 +382,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             )
 
             generator.zero_grad()
-            weighted_path_loss = args.path_regularize * path_loss
+            weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
 
             if args.path_batch_shrink:
                 weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
@@ -381,41 +398,35 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+        ############# train mapping network #############
+        requires_grad(fine2style, True)
+        requires_grad(style2fine, True)
+        requires_grad(generator, False)
 
-        ############# guide disentangle #############
-        requires_grad(generator, True)
+        z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+        if not args.tie_code:
+            z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-        guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
-        if guide_regularize:
-            # pass
-            with torch.no_grad():
-                noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc = generator(noise, return_ssc=True, inject_index=args.injidx)
+        fine_img = fine_generator(z, b, p, c)
+        style_z = fine2style(fine_img, n_first=True)
 
-            v = [torch.zeros_like(s) for s in ssc]
-            for s in v:
-                s[:, :, 0:args.fg_dim] = torch.ones_like(s[:, :, 0:args.fg_dim])
+        style_img, _ = generator(style_z, inject_index=args.injidx)
 
-            img1, j1 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
-            j1 = torch.sum(torch.abs(j1), dim=1)
+        rec_fine_img = style2fine(style_img)
 
-            v = [torch.zeros_like(s) for s in ssc]
-            for s in v:
-                s[:, :, args.fg_dim:] = torch.ones_like(s[:, :, args.fg_dim:])
+        fake_pred = discriminator(style_img)
+        g_loss = g_nonsaturating_loss(fake_pred)
 
-            img2, j2 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
-            j2 = torch.sum(torch.abs(j2), dim=1)
+        rec_loss = F.mse_loss(rec_fine_img, fine_img)
+        loss = g_loss + rec_loss
 
-            disent_loss = torch.mean(j1 * j2) + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
-            disent_loss_ = disent_loss * args.dis
+        loss_dict["rec_g"] = g_loss
+        loss_dict["rec"] = rec_loss
 
-            loss_dict["dis"] = disent_loss
-
-            generator.zero_grad()
-            disent_loss_.backward()
-            g_optim.step()
-
+        fine2style.zero_grad()
+        style2fine.zero_grad()
+        loss.backward()
+        cog_optim.step()
 
         accumulate(g_ema, g_module, accum)
 
@@ -428,7 +439,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        dis_loss_val = loss_reduced["dis"].item()
+        recg_loss_val = loss_reduced["rec_g"].item()
+        rec_loss_val = loss_reduced["rec"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -444,34 +456,32 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     {
                         "Generator": g_loss_val,
                         "Discriminator": d_loss_val,
-                        "Augment": ada_aug_p,
-                        "Rt": r_t_stat,
-                        "R1": r1_val,
                         "Path Length Regularization": path_loss_val,
                         "Mean Path Length": mean_path_length,
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "Code disentangle loss": dis_loss_val,
+                        "Fine2style Adv": recg_loss_val,
+                        "Reconstruction": rec_loss_val,
                     }
                 )
 
             if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
-                    noises_ = g_module.make_noise()
+                    fine2style.eval()
 
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=noises_, return_ssc=True)
+                    z, b, p, c = sample_codes(8, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
+                    if not args.tie_code:
+                        z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=noises_, return_ssc=True)
+                    fine_img = fine_generator(z, b, p, c)
+                    style_z = fine2style(fine_img, n_first=True)
+                    style_img, _ = g_ema(style_z, inject_index=args.injidx)
 
-                    ssc3 = copy.deepcopy(ssc1)
-                    for l in range(len(ssc3)):
-                        ssc3[l][:, :, args.fg_dim:] = ssc2[l][:, :, args.fg_dim:]
+                    style_z = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img1, _ = g_ema(style_z, inject_index=args.injidx)
 
-                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=noises_)
 
                     utils.save_image(
                         style_img1,
@@ -482,7 +492,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        style_img2,
+                        fine_img,
                         f"sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
@@ -490,7 +500,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        style_img3,
+                        style_img,
                         f"sample/{str(i).zfill(6)}_2.png",
                         nrow=8,
                         normalize=True,
@@ -500,9 +510,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "style image1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
-                                "mix style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "rand sample image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "fine image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "fine2style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
 
@@ -512,13 +522,17 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "g": g_module.state_dict(),
                         "d": d_module.state_dict(),
                         "g_ema": g_ema.state_dict(),
+                        "f2s": f2s_module.state_dict(),
+                        "s2f": s2f_module.state_dict(),
+                        "fine": fine_module.state_dict(),
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
+                        "cog_optim": cog_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_1.pt",
+                    f"checkpoint/{str(i).zfill(6)}_9.pt",
                 )
 
 
@@ -561,7 +575,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path_regularize",
         type=float,
-        default=1,
+        default=2,
         help="weight of the path length regularization",
     )
     parser.add_argument(
@@ -579,7 +593,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--g_reg_every",
         type=int,
-        default=8,
+        default=4,
         help="interval of the applying path length regularization",
     )
     # parser.add_argument(
@@ -602,6 +616,18 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="path to the checkpoints to resume training",
+    )
+    parser.add_argument(
+        "--fine_ckpt",
+        type=str,
+        default=None,
+        help="path to the fine ckpt",
+    )
+    parser.add_argument(
+        "--style_ckpt",
+        type=str,
+        default=None,
+        help="path to the style ckpt",
     )
     parser.add_argument("--lr", type=float, default=0.002,
                         help="learning rate")
@@ -650,13 +676,10 @@ if __name__ == "__main__":
     parser.add_argument('--ds_name', type=str, default='STANFORDCAR',
                         help='dataset used for training finegan (LSUNCAR | CUB | STANFORDCAR)')
 
-    parser.add_argument("--kl_lambda", type=float, default=0.01)
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--dis", type=float, default=1, help="mse weight")
-
-    parser.add_argument("--bin", type=float, default=1, help="mse weight")
-    parser.add_argument("--mk", type=float, default=1, help="mse weight")
-    parser.add_argument("--mp", type=float, default=1, help="mse weight")
+    parser.add_argument("--guide_mse_fg", type=float, default=5, help="mse weight")
+    parser.add_argument("--guide_mse_bg", type=float, default=5, help="mse weight")
+    parser.add_argument("--mp", type=float, default=5, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -675,6 +698,7 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
+    args.mp_nws = 2
 
     args.start_iter = 0
 
@@ -705,6 +729,25 @@ if __name__ == "__main__":
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
+    fine_generator = G_NET(ds_name=args.ds_name).to(device)
+
+    fine2style = Encoder(
+        size=128,
+        num_ws=args.mp_nws,
+        w_dim=args.latent
+    ).to(device)
+
+    style2fine = UNet(
+        n_channels=3,
+        n_classes=3,
+    ).to(device)
+
+    cog_optim = optim.Adam(
+        list(fine2style.parameters()) + list(style2fine.parameters()),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
+
     g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
 
@@ -720,25 +763,38 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
+    assert args.ckpt is not None or args.fine_ckpt is not None
     if args.ckpt is not None:
         print("load model:", args.ckpt)
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        try:
-            ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
-
-        except ValueError:
-            args.start_iter = 20000
-
+        args.start_iter = ckpt['cur_itr']
 
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
+        fine2style.load_state_dict(ckpt['f2s'])
+        style2fine.load_state_dict(ckpt['s2f'])
+        fine_generator.load_state_dict(ckpt["fine"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
+        cog_optim.load_state_dict(ckpt["cog_optim"])
+
+    if args.fine_ckpt is not None:
+        print("load fine model:", args.fine_ckpt)
+        fine_dict = torch.load(args.fine_ckpt, map_location=lambda storage, loc: storage)
+        fine_generator.load_state_dict(fine_dict)
+
+    if args.style_ckpt is not None:
+        print("load fine model:", args.style_ckpt)
+        style_dict = torch.load(args.style_ckpt, map_location=lambda storage, loc: storage)
+        generator.load_state_dict(style_dict["g"])
+        discriminator.load_state_dict(style_dict["d"])
+        g_ema.load_state_dict(style_dict["g_ema"])
+        g_optim.load_state_dict(style_dict["g_optim"])
+        d_optim.load_state_dict(style_dict["d_optim"])
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
@@ -751,6 +807,30 @@ if __name__ == "__main__":
 
         discriminator = nn.parallel.DistributedDataParallel(
             discriminator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=True
+        )
+
+        fine2style = nn.parallel.DistributedDataParallel(
+            fine2style,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=True
+        )
+
+        style2fine = nn.parallel.DistributedDataParallel(
+            style2fine,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=True
+        )
+
+        fine_generator = nn.parallel.DistributedDataParallel(
+            fine_generator,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -776,7 +856,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_1")
+        wandb.init(project="guide 9")
 
-    train(args, loader, generator, discriminator,
-          g_optim, d_optim, g_ema, device)
+    train(args, loader, generator, discriminator, fine_generator, fine2style, style2fine,
+          g_optim, d_optim, cog_optim, g_ema, device)
