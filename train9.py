@@ -27,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import Generator, Discriminator, Encoder, UNet
+from model import Generator, Discriminator, UNet, MuVarEncoder
 from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
@@ -408,7 +408,7 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
             z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
         fine_img = fine_generator(z, b, p, c)
-        style_z = fine2style(fine_img, n_first=True)
+        style_z, kl_loss = fine2style(fine_img, n_first=True)
 
         style_img, _ = generator(style_z, inject_index=args.injidx)
 
@@ -417,7 +417,11 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
         z_loss = torch.abs(torch.mean(style_z)) + torch.abs(torch.std(style_z) - 1)
 
         rec_loss = F.mse_loss(rec_fine_img, fine_img)
+<<<<<<< HEAD
         loss = z_loss + rec_loss * 5
+=======
+        loss = z_loss + rec_loss + kl_loss * args.kl
+>>>>>>> c0be6f653176be1654a0aa8327fe8b0d74c9c67e
 
         loss_dict["mean"] = torch.mean(style_z)
         loss_dict["std"] = torch.std(style_z)
@@ -677,7 +681,7 @@ if __name__ == "__main__":
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
     parser.add_argument("--guide_mse_fg", type=float, default=5, help="mse weight")
     parser.add_argument("--guide_mse_bg", type=float, default=5, help="mse weight")
-    parser.add_argument("--mp", type=float, default=5, help="mse weight")
+    parser.add_argument("--kl", type=float, default=0.01, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -729,7 +733,7 @@ if __name__ == "__main__":
 
     fine_generator = G_NET(ds_name=args.ds_name).to(device)
 
-    fine2style = Encoder(
+    fine2style = MuVarEncoder(
         size=128,
         num_ws=args.mp_nws,
         w_dim=args.latent
