@@ -401,7 +401,7 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
         ############# train mapping network #############
         requires_grad(fine2style, True)
         requires_grad(style2fine, True)
-        requires_grad(generator, True)
+        requires_grad(generator, False)
 
         z, b, p, c = sample_codes(args.batch, args.z_dim, args.b_dim, args.p_dim, args.c_dim, device)
         if not args.tie_code:
@@ -412,26 +412,26 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
 
         style_img, _ = generator(style_z, inject_index=args.injidx)
 
-        rec_fine_img = style2fine(style_img)
+        # rec_fine_img = style2fine(style_img)
 
-        z_loss = torch.abs(torch.mean(style_z)) + torch.abs(torch.std(style_z) - 1)
+        # z_loss = torch.abs(torch.mean(style_z)) + torch.abs(torch.std(style_z) - 1)
+        # rec_loss = F.mse_loss(rec_fine_img, fine_img)
+        rec_loss = F.mse_loss(style_img, fine_img)
 
-        rec_loss = F.mse_loss(rec_fine_img, fine_img)
-<<<<<<< HEAD
-        loss = z_loss + rec_loss * 5
-=======
-        loss = z_loss + rec_loss + kl_loss * args.kl
->>>>>>> c0be6f653176be1654a0aa8327fe8b0d74c9c67e
+        z_loss = torch.zeros(1).to(device)
+
+        loss = z_loss * 0.01 + rec_loss * 5 + kl_loss * args.kl
 
         loss_dict["mean"] = torch.mean(style_z)
         loss_dict["std"] = torch.std(style_z)
         loss_dict["rec"] = rec_loss
-        loss_dict["z"] = z_loss
+        # loss_dict["z"] = z_loss
 
         fine2style.zero_grad()
         style2fine.zero_grad()
         loss.backward()
         cog_optim.step()
+
 
         accumulate(g_ema, g_module, accum)
 
@@ -447,14 +447,14 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
         mean_loss_val = loss_reduced["mean"].item()
         std_loss_val = loss_reduced["std"].item()
         rec_loss_val = loss_reduced["rec"].item()
-        z_loss_val = loss_reduced["z"].item()
+        # z_loss_val = loss_reduced["z"].item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; z: {z_loss_val:.4f}; r1: {r1_val:.4f}; "
+                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                     f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
-                    f"augment: {ada_aug_p:.4f}"
+                    f"augment: {ada_aug_p:.4f};"# z: {z_loss_val:.4f};"
                 )
             )
 
@@ -484,7 +484,7 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
                         z, b, p, c = rand_sample_codes(prev_z=z, prev_b=b, prev_p=p, prev_c=c, rand_code=['b', 'p'])
 
                     fine_img = fine_generator(z, b, p, c)
-                    style_z = fine2style(fine_img, n_first=True)
+                    style_z, _ = fine2style(fine_img, n_first=True)
                     style_img, _ = g_ema(style_z, inject_index=args.injidx)
 
                     style_z = mixing_noise(8, args.latent, args.mixing, device)
@@ -633,6 +633,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--lr", type=float, default=0.002,
                         help="learning rate")
+    parser.add_argument("--lr_cog", type=float, default=0.004,
+                        help="learning rate")
     parser.add_argument(
         "--channel_multiplier",
         type=int,
@@ -736,7 +738,7 @@ if __name__ == "__main__":
     fine2style = MuVarEncoder(
         size=128,
         num_ws=args.mp_nws,
-        w_dim=args.latent
+        w_dim=args.latent,
     ).to(device)
 
     style2fine = UNet(
@@ -746,7 +748,7 @@ if __name__ == "__main__":
 
     cog_optim = optim.Adam(
         list(fine2style.parameters()) + list(style2fine.parameters()),
-        lr=args.lr,
+        lr=args.lr_cog,
         betas=(0, 0.99),
     )
 

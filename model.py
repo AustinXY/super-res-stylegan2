@@ -544,6 +544,7 @@ class Generator(nn.Module):
         input_is_ssc=False,
         return_ssc=False,
         return_img_only=False,
+        return_out_layer=None,
     ):
         if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
@@ -636,21 +637,37 @@ class Generator(nn.Module):
 
             out = self.input(batch)
             out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
+            if 0 == return_out_layer:
+                out_out = out.clone()
+
             skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
+            if 1 == return_out_layer:
+                skip = out.clone()
 
             i = 2
             for conv1, conv2, noise1, noise2, to_rgb in zip(
                 self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
             ):
                 out, _ = conv1(out, latent[i], noise=noise1, input_is_ssc=input_is_ssc)
+                if i == return_out_layer:
+                    out_out = out.clone()
+
                 out, _ = conv2(out, latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                if i+1 == return_out_layer:
+                    out_out = out.clone()
+
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
+                if i+2 == return_out_layer:
+                    out_out = skip.clone()
 
                 i += 3
 
             ssc = latent
 
         image = skip
+
+        if return_out_layer is not None:
+            return out_out
 
         if return_img_only:
             return image

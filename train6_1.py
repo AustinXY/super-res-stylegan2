@@ -232,9 +232,11 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
+noises4generate = []
+
 def generate(*ssc):
     ssc = [s for s in ssc]
-    img, _ = generator(ssc, input_is_ssc=True)
+    img, _ = generator(ssc, input_is_ssc=True, noise=noises4generate)
     return img
 
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
@@ -390,19 +392,22 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         if guide_regularize:
             # pass
             with torch.no_grad():
+                global noises4generate
+                noises4generate = g_module.make_noise()
+
                 noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc = generator(noise, return_ssc=True, inject_index=args.injidx)
+                _, ssc = generator(noise, return_ssc=True, inject_index=args.injidx, noise=noises4generate)
 
             v = [torch.zeros_like(s) for s in ssc]
             for s in v:
-                s[:, :, 0:args.fg_dim] = torch.ones_like(s[:, :, 0:args.fg_dim])
+                s[:, :, 0:args.fg_dim] = 1
 
             img1, j1 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
             j1 = torch.sum(torch.abs(j1), dim=1)
 
             v = [torch.zeros_like(s) for s in ssc]
             for s in v:
-                s[:, :, args.fg_dim:] = torch.ones_like(s[:, :, args.fg_dim:])
+                s[:, :, args.fg_dim:] = 1
 
             img2, j2 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
             j2 = torch.sum(torch.abs(j2), dim=1)
@@ -469,7 +474,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
                     ssc3 = copy.deepcopy(ssc1)
                     for l in range(len(ssc3)):
-                        ssc3[l][:, :, args.fg_dim:] = ssc2[l][:, :, args.fg_dim:]
+                        dim = ssc3[l].size(2)
+                        ssc3[l][:, :, dim//2:] = ssc2[l][:, :, dim//2:]
 
                     style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=noises_)
 
@@ -652,7 +658,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--kl_lambda", type=float, default=0.01)
     parser.add_argument("--mse", type=float, default=4, help="mse weight")
-    parser.add_argument("--dis", type=float, default=1, help="mse weight")
+    parser.add_argument("--dis", type=float, default=0.5, help="mse weight")
 
     parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
