@@ -613,6 +613,8 @@ class Generator(nn.Module):
             batch = latent.size(0)
 
             out = self.input(batch)
+            outs.append(out)
+
             out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
             ssc.append(s)
             outs.append(out)
@@ -643,6 +645,8 @@ class Generator(nn.Module):
             batch = latent[0].size(0)
 
             out = self.input(batch)
+            outs.append(out)
+
             out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
             outs.append(out)
 
