@@ -621,7 +621,6 @@ class Generator(nn.Module):
 
             skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
             ssc.append(s)
-            outs.append(skip)
 
             i = 1
             for conv1, conv2, noise1, noise2, to_rgb in zip(
@@ -637,7 +636,6 @@ class Generator(nn.Module):
 
                 skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
                 ssc.append(s)
-                outs.append(skip)
 
                 i += 2
 
@@ -651,7 +649,6 @@ class Generator(nn.Module):
             outs.append(out)
 
             skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
-            outs.append(skip)
 
             i = 2
             for conv1, conv2, noise1, noise2, to_rgb in zip(
@@ -664,7 +661,6 @@ class Generator(nn.Module):
                 outs.append(out)
 
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
-                outs.append(skip)
 
                 i += 3
 
