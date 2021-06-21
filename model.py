@@ -544,7 +544,7 @@ class Generator(nn.Module):
         input_is_ssc=False,
         return_ssc=False,
         return_img_only=False,
-        return_out_layer=None,
+        return_outs=False,
     ):
         if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
@@ -606,7 +606,7 @@ class Generator(nn.Module):
         elif input_is_ssc:
             latent = styles
 
-
+        outs = []
         if not input_is_ssc:
             ssc = []
 
@@ -615,9 +615,11 @@ class Generator(nn.Module):
             out = self.input(batch)
             out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
             ssc.append(s)
+            outs.append(out)
 
             skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
             ssc.append(s)
+            outs.append(skip)
 
             i = 1
             for conv1, conv2, noise1, noise2, to_rgb in zip(
@@ -625,10 +627,15 @@ class Generator(nn.Module):
             ):
                 out, s = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
                 ssc.append(s)
+                outs.append(out)
+
                 out, s = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
                 ssc.append(s)
+                outs.append(out)
+
                 skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
                 ssc.append(s)
+                outs.append(skip)
 
                 i += 2
 
@@ -637,28 +644,23 @@ class Generator(nn.Module):
 
             out = self.input(batch)
             out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
-            if 0 == return_out_layer:
-                out_out = out.clone()
+            outs.append(out)
 
             skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
-            if 1 == return_out_layer:
-                skip = out.clone()
+            outs.append(skip)
 
             i = 2
             for conv1, conv2, noise1, noise2, to_rgb in zip(
                 self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
             ):
                 out, _ = conv1(out, latent[i], noise=noise1, input_is_ssc=input_is_ssc)
-                if i == return_out_layer:
-                    out_out = out.clone()
+                outs.append(out)
 
                 out, _ = conv2(out, latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
-                if i+1 == return_out_layer:
-                    out_out = out.clone()
+                outs.append(out)
 
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
-                if i+2 == return_out_layer:
-                    out_out = skip.clone()
+                outs.append(skip)
 
                 i += 3
 
@@ -666,8 +668,8 @@ class Generator(nn.Module):
 
         image = skip
 
-        if return_out_layer is not None:
-            return out_out
+        if return_outs:
+            return outs
 
         if return_img_only:
             return image
@@ -1777,6 +1779,6 @@ class MuVarEncoder(nn.Module):
         loss = self.get_kl_loss(mu, logvar)
 
         if n_first:
-            return out.transpose(0, 1), loss
+            return z.transpose(0, 1), loss
 
-        return out, loss
+        return z, loss

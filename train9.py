@@ -412,20 +412,18 @@ def train(args, loader, generator, discriminator, fine_generator, fine2style, st
 
         style_img, _ = generator(style_z, inject_index=args.injidx)
 
-        # rec_fine_img = style2fine(style_img)
+        rec_fine_img = style2fine(style_img)
 
-        # z_loss = torch.abs(torch.mean(style_z)) + torch.abs(torch.std(style_z) - 1)
-        # rec_loss = F.mse_loss(rec_fine_img, fine_img)
-        rec_loss = F.mse_loss(style_img, fine_img)
-
-        z_loss = torch.zeros(1).to(device)
+        z_loss = torch.abs(torch.mean(style_z)) + torch.abs(torch.std(style_z) - 1)
+        rec_loss = F.mse_loss(rec_fine_img, fine_img)
+        # rec_loss = F.mse_loss(style_img, fine_img)
 
         loss = z_loss * 0.01 + rec_loss * 5 + kl_loss * args.kl
 
         loss_dict["mean"] = torch.mean(style_z)
         loss_dict["std"] = torch.std(style_z)
         loss_dict["rec"] = rec_loss
-        # loss_dict["z"] = z_loss
+        loss_dict["z"] = z_loss
 
         fine2style.zero_grad()
         style2fine.zero_grad()
