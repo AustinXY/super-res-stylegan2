@@ -4,7 +4,7 @@ import random
 import os
 import gc
 import copy
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 import numpy as np
 import torch
@@ -400,15 +400,16 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             v = [torch.zeros_like(s) for s in ssc]
             for s in v:
-                s.size(2)
-                s[:, :, 0:s.size(2)//2] = 1
+                n_channel = s.size(2)
+                s[:, :, 0:n_channel//2] = 1
 
             img1, j1 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
             j1 = torch.sum(torch.abs(j1), dim=1)
 
             v = [torch.zeros_like(s) for s in ssc]
             for s in v:
-                s[:, :, s.size(2)//2:] = 1
+                n_channel = s.size(2)
+                s[:, :, n_channel//2:] = 1
 
             img2, j2 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
             j2 = torch.sum(torch.abs(j2), dim=1)

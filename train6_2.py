@@ -4,7 +4,7 @@ import random
 import os
 import gc
 import copy
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 import numpy as np
 import torch
@@ -390,40 +390,32 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
         if guide_regularize:
-            noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
-            outs1 = generator(noise, return_outs=True, inject_index=args.injidx)
+            with torch.no_grad():
+                img_noise = g_module.make_noise()
 
-            noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
-            outs2 = generator(noise, return_outs=True, inject_index=args.injidx)
+                noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
+                _, ssc1 = generator(noise1, return_ssc=True, inject_index=args.injidx, noise=img_noise)
 
-            loss = 0
-            for o1, o2 in zip(outs1, outs2):
-                torch.
+                noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
+                _, ssc2 = generator(noise2, return_ssc=True, inject_index=args.injidx, noise=img_noise)
 
-            v = [torch.zeros_like(s) for s in ssc]
-            for s in v:
-                s[:, :, 0:args.fg_dim] = 1
+                ssc3 = copy.deepcopy(ssc1)
+                for s3, s2 in zip(ssc3, ssc2):
+                    channel = s3.size(2)
+                    s3[:, :, channel//2:] = s2[:, :, channel//2:]
 
-            img1, j1 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
-            j1 = torch.sum(torch.abs(j1), dim=1)
+            outs1 = generator(ssc1, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+            outs3 = generator(ssc3, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
-            v = [torch.zeros_like(s) for s in ssc]
-            for s in v:
-                s[:, :, args.fg_dim:] = 1
+            loss = torch.tensor(0.0, device=device)
+            for o1, o3 in zip(outs1, outs3):
+                n_channel = o1.size(1)
+                loss += F.mse_loss(o1[:, 0:n_channel//2], o3[:, 0:n_channel//2])
 
-            img2, j2 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
-            j2 = torch.sum(torch.abs(j2), dim=1)
-
-            # disent_loss = torch.mean(j1 * j2) + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
-            disent_loss = torch.mean(j1 * j2) * args.dis1 + F.relu(args.dif_max - torch.mean(torch.abs(j1 - j2))) * args.dis2 + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
-            # disent_loss = torch.mean(j1 * j2) * args.dis1 - torch.mean(torch.abs(j1 - j2)) * args.dis2 + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
-
-            loss_dict["dis1"] = torch.mean(j1 * j2)
-            # loss_dict["dis2"] = F.relu(args.dif_max - torch.mean(torch.abs(j1 - j2)))
-            loss_dict["dis2"] = -torch.mean(torch.abs(j1 - j2))
+            loss_dict["out"] = loss
 
             generator.zero_grad()
-            disent_loss.backward()
+            loss.backward()
             g_optim.step()
 
 
@@ -438,8 +430,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        dis1_loss_val = loss_reduced["dis1"].item()
-        dis2_loss_val = loss_reduced["dis2"].item()
+        out_loss_val = loss_reduced["out"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -455,36 +446,32 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     {
                         "Generator": g_loss_val,
                         "Discriminator": d_loss_val,
-                        "Augment": ada_aug_p,
-                        "Rt": r_t_stat,
-                        "R1": r1_val,
                         "Path Length Regularization": path_loss_val,
                         "Mean Path Length": mean_path_length,
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "Code disentangle loss1": dis1_loss_val,
-                        "Code disentangle loss2": dis2_loss_val,
+                        "out sim loss": out_loss_val,
                     }
                 )
 
             if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
-                    noises_ = g_module.make_noise()
+                    img_noise = g_module.make_noise()
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=noises_, return_ssc=True)
+                    style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=noises_, return_ssc=True)
+                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
 
                     ssc3 = copy.deepcopy(ssc1)
                     for l in range(len(ssc3)):
-                        dim = ssc3[l].size(2)
-                        ssc3[l][:, :, dim//2:] = ssc2[l][:, :, dim//2:]
+                        channel = ssc3[l].size(2)
+                        ssc3[l][:, :, channel//2:] = ssc2[l][:, :, channel//2:]
 
-                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=noises_)
+                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
                     utils.save_image(
                         style_img1,
@@ -531,7 +518,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_1.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_2.pt",
                 )
 
 
@@ -791,7 +778,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_1")
+        wandb.init(project="guide 6_2")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device)

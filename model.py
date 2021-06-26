@@ -384,8 +384,7 @@ class StyledConv(nn.Module):
         # out = out + self.bias
         out = self.activate(out)
 
-        # return out, s
-        return out
+        return out, s
 
 
 class ToRGB(nn.Module):
@@ -408,8 +407,7 @@ class ToRGB(nn.Module):
 
             out = out + skip
 
-        # return out, s
-        return out
+        return out, s
 
 
 class Generator(nn.Module):
@@ -674,7 +672,7 @@ class Generator(nn.Module):
             return outs
 
         if return_ssc:
-            return ssc
+            return image, ssc
 
         if return_img_only:
             return image
