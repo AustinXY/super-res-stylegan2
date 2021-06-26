@@ -26,7 +26,7 @@ from distributed import (
     get_world_size,
 )
 
-from scene_model import _Generator, Discriminator
+from scene_model import Generator, Discriminator
 from mixnmatch_model import G_NET
 from criteria.vgg import VGGLoss
 
@@ -637,11 +637,11 @@ if __name__ == "__main__":
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
-    generator = _Generator(args, device).to(device)
+    generator = Generator(args, device).to(device)
 
     discriminator = Discriminator(args).to(device)
 
-    g_ema = _Generator(args, device).to(device)
+    g_ema = Generator(args, device).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
