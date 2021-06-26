@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import numpy as np
 import torch
@@ -25,9 +25,8 @@ from distributed import (
     reduce_sum,
     get_world_size,
 )
-
-from scene_model import _Generator, Discriminator
-from model import G_NET
+from scene_model import Generator, Discriminator
+from mixnmatch_model import G_NET
 from criteria.vgg import VGGLoss
 
 from op import conv2d_gradfix
@@ -239,7 +238,6 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
     fine_generator.eval()
     fine_generator.requires_grad_(False)
 
-    # vgg_loss = VGGLoss()
     for idx in pbar:
         i = idx + args.start_iter
 
@@ -410,10 +408,10 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
-                    f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                    # f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                    # f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"kl: {kl_loss_val:.4f}; rec: {rec_loss_val:.4f}; "
-                    f"augment: {ada_aug_p:.4f}"
+                    # f"augment: {ada_aug_p:.4f}"
                 )
             )
 
@@ -445,7 +443,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
 
                     fine_img = fine_generator(z, b, p, c)
 
-                    output = g_ema(fine_img, return_loss=False)
+                    output = g_ema(fine_img)
                     style_img = output['image']
 
                     utils.save_image(
@@ -472,7 +470,7 @@ def train(args, loader, generator, discriminator, fine_generator, g_optim, d_opt
                             }
                         )
 
-            if i % 20000 == 0 and i != args.start_iter:
+            if i % 50000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -510,11 +508,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--style_dim", type=int, default=512)
-    parser.add_argument("--scene_size", type=tuple, default=(512, 512),
+    parser.add_argument("--size", type=int, default=128)
+    parser.add_argument("--scene_size", type=tuple, default=(128, 128),
                         help='size of image (H*W), used in defining dataset and model')
     parser.add_argument("--prior_size", type=tuple,
                         default=(128, 128), help='input size to encoder')
-    parser.add_argument("--starting_height_size", type=int, default=8,
+    parser.add_argument("--starting_height_size", type=int, default=4,
                         help='encoder feature passed to generator, support 4,8,16,32.')
 
     parser.add_argument(
@@ -547,7 +546,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mse_reg_every",
         type=int,
-        default=4,
+        default=1,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(
@@ -637,11 +636,11 @@ if __name__ == "__main__":
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
-    generator = _Generator(args, device).to(device)
+    generator = Generator(args, device).to(device)
 
     discriminator = Discriminator(args).to(device)
 
-    g_ema = _Generator(args, device).to(device)
+    g_ema = Generator(args, device).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
@@ -655,6 +654,7 @@ if __name__ == "__main__":
         lr=args.lr * g_reg_ratio,
         betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),
     )
+
     d_optim = optim.Adam(
         discriminator.parameters(),
         lr=args.lr * d_reg_ratio,

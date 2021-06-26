@@ -390,31 +390,32 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
         if guide_regularize:
-            # pass
-            with torch.no_grad():
-                global noises4generate
-                noises4generate = g_module.make_noise()
+            noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
+            outs1 = generator(noise, return_outs=True, inject_index=args.injidx)
 
-                noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc = generator(noise, return_ssc=True, inject_index=args.injidx, noise=noises4generate)
+            noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
+            outs2 = generator(noise, return_outs=True, inject_index=args.injidx)
+
+            loss = 0
+            for o1, o2 in zip(outs1, outs2):
+                torch.
 
             v = [torch.zeros_like(s) for s in ssc]
             for s in v:
-                s.size(2)
-                s[:, :, 0:s.size(2)//2] = 1
+                s[:, :, 0:args.fg_dim] = 1
 
             img1, j1 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
             j1 = torch.sum(torch.abs(j1), dim=1)
 
             v = [torch.zeros_like(s) for s in ssc]
             for s in v:
-                s[:, :, s.size(2)//2:] = 1
+                s[:, :, args.fg_dim:] = 1
 
             img2, j2 = torch.autograd.functional.jvp(generate, tuple(ssc), v=tuple(v), create_graph=True, strict=True)
             j2 = torch.sum(torch.abs(j2), dim=1)
 
-            disent_loss = torch.mean(j1 * j2) + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
-            # disent_loss = torch.mean(j1 * j2) * args.dis1 + F.relu(args.dif_max - torch.mean(torch.abs(j1 - j2))) * args.dis2 + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
+            # disent_loss = torch.mean(j1 * j2) + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
+            disent_loss = torch.mean(j1 * j2) * args.dis1 + F.relu(args.dif_max - torch.mean(torch.abs(j1 - j2))) * args.dis2 + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
             # disent_loss = torch.mean(j1 * j2) * args.dis1 - torch.mean(torch.abs(j1 - j2)) * args.dis2 + (img1[0, 0, 0, 0] + img2[0, 0, 0, 0]) * 0
 
             loss_dict["dis1"] = torch.mean(j1 * j2)

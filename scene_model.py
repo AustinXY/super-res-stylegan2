@@ -3,7 +3,7 @@ import random
 import torch
 from torch import nn
 from torch.nn import functional as F
-from model import ModulatedConv2d, StyledConv, ToRGB
+from model import ModulatedConv2d, StyledConv, ToRGB, _MGenerator
 
 
 class LeakyReLU(nn.Module):
@@ -467,6 +467,7 @@ class Generator(nn.Module):
 
         start_feature, styles, input_type, loss = self.__prepare_starting_feature(
             global_pri, styles, input_type)
+
         latent = self.__prepare_letent(
             styles, inject_index, truncation, truncation_latent, input_type)
         noise = self.__prepare_noise(noise, randomize_noise)
