@@ -412,7 +412,39 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 n_channel = o1.size(1)
                 loss += F.mse_loss(o1[:, 0:n_channel//2], o3[:, 0:n_channel//2])
 
-            loss_dict["out"] = loss
+            loss_dict["fg_out"] = loss
+
+            generator.zero_grad()
+            loss.backward()
+            g_optim.step()
+
+            with torch.no_grad():
+                img_noise = g_module.make_noise()
+
+                noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
+                _, ssc1 = generator(noise1, return_ssc=True, inject_index=args.injidx, noise=img_noise)
+
+                noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
+                _, ssc2 = generator(noise2, return_ssc=True, inject_index=args.injidx, noise=img_noise)
+
+                ssc3 = copy.deepcopy(ssc1)
+                for s3, s2 in zip(ssc3, ssc2):
+                    channel = s3.size(2)
+                    s3[:, :, channel//2:] = s2[:, :, channel//2:]
+
+            outs2 = generator(ssc2, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+            outs3 = generator(ssc3, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+
+            loss = torch.tensor(0.0, device=device)
+            for o2, o3 in zip(outs2, outs3):
+                n_channel = o2.size(1)
+
+                o = o2[:, n_channel//2:] * o3[:, n_channel//2:]
+                mk = torch.where(o < args.outs_thrsh, torch.zeros_like(o), torch.ones_like(o))
+
+                loss += torch.mean(F.mse_loss(o2[:, n_channel//2:], o3[:, n_channel//2:], reduction='none') * mk)
+
+            loss_dict["bg_out"] = loss
 
             generator.zero_grad()
             loss.backward()
@@ -430,7 +462,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        out_loss_val = loss_reduced["out"].item()
+        fgout_loss_val = loss_reduced["fg_out"].item()
+        bgout_loss_val = loss_reduced["bg_out"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -451,7 +484,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "out sim loss": out_loss_val,
+                        "fg out sim loss": fgout_loss_val,
+                        "bg out sim loss": bgout_loss_val,
                     }
                 )
 
@@ -677,6 +711,7 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
+    args.outs_thrsh = 0.001
 
     args.start_iter = 0
 
