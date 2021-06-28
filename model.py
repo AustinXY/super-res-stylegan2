@@ -1784,66 +1784,7 @@ class MuVarEncoder(nn.Module):
         return z, loss
 
 
-class _MuVarEncoder(nn.Module):
-    def __init__(self, blur_kernel=[1, 3, 3, 1]):
-        super().__init__()
-
-        channels = {4: 512,
-                    8: 512,
-                    16: 512,
-                    32: 512,
-                    64: 512,
-                    128: 128 * 2,
-                    256: 64 * 2,
-                    512: 32 * 2,
-                    1024: 16 * 2}
-
-        self.convs1 = ConvLayer(3, channels[128], 1)
-
-        log_size = int(math.log(128, 2))
-
-        in_channel = channels[128]
-        self.convs2 = nn.ModuleList()
-        for i in range(log_size, 2, -1):
-            out_size = 2 ** (i-1)
-            out_channel = channels[out_size]
-            self.convs2.append(_ResBlock(in_channel, out_channel))
-            in_channel = out_channel
-
-        w_over_h = 1
-
-        self.final_linear = EqualLinear(
-            channels[4] * 4 * 4 * int(w_over_h), channels[4], activation='fused_lrelu')
-        self.mu_linear = EqualLinear(channels[4], 512)
-        self.var_linear = EqualLinear(channels[4], 512)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps.mul(std) + mu
-
-    def get_kl_loss(self, mu, logvar):
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    def forward(self, input):
-        batch = input.shape[0]
-
-        out = self.convs1(input)
-        for conv in self.convs2:
-            out = conv(out)
-
-        out = self.final_linear(out.view(batch, -1))
-        mu = self.mu_linear(out)
-        logvar = self.var_linear(out)
-        z = self.reparameterize(mu, logvar)
-
-        # print(z)
-        # sys.exit()
-        loss = self.get_kl_loss(mu, logvar)
-        return [z], loss
-
-
-class _MGenerator(nn.Module):
+class MKGenerator(nn.Module):
     def __init__(
         self,
         size,
@@ -1852,6 +1793,7 @@ class _MGenerator(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
+        use_w_mix=False,
     ):
         super().__init__()
 
@@ -1861,7 +1803,7 @@ class _MGenerator(nn.Module):
 
         layers = [PixelNorm()]
 
-        for i in range(n_mlp):
+        for _ in range(n_mlp):
             layers.append(
                 EqualLinear(
                     style_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
@@ -1884,7 +1826,7 @@ class _MGenerator(nn.Module):
 
         self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
-            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel
+            self.channels[4], self.channels[4]+1, 3, style_dim, blur_kernel=blur_kernel
         )
         self.to_rgb1 = ToRGB(self.channels[4], style_dim, upsample=False)
 
@@ -1901,7 +1843,8 @@ class _MGenerator(nn.Module):
         for layer_idx in range(self.num_layers):
             res = (layer_idx + 5) // 2
             shape = [1, 1, 2 ** res, 2 ** res]
-            self.noises.register_buffer(f"noise_{layer_idx}", torch.randn(*shape))
+            self.noises.register_buffer(
+                f"noise_{layer_idx}", torch.randn(*shape))
 
         for i in range(3, self.log_size + 1):
             out_channel = self.channels[2 ** i]
@@ -1909,7 +1852,7 @@ class _MGenerator(nn.Module):
             self.convs.append(
                 StyledConv(
                     in_channel,
-                    out_channel,
+                    out_channel+1,
                     3,
                     style_dim,
                     upsample=True,
@@ -1919,7 +1862,7 @@ class _MGenerator(nn.Module):
 
             self.convs.append(
                 StyledConv(
-                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel
+                    out_channel, out_channel+1, 3, style_dim, blur_kernel=blur_kernel
                 )
             )
 
@@ -1928,6 +1871,17 @@ class _MGenerator(nn.Module):
             in_channel = out_channel
 
         self.n_latent = self.log_size * 2 - 2
+
+        if use_w_mix:
+            self.wpmk = WpMask(self.n_latent, style_dim)
+
+    def mix_wp(self, fg_wp, bg_wp):
+        batch = fg_wp.size(0)
+        wpmk = self.wpmk()
+        fg_mk = wpmk.repeat(batch, 1, 1)
+        bg_mk = torch.ones_like(fg_mk) - fg_mk
+        wp = fg_wp * fg_mk + bg_wp * bg_mk
+        return wp, wpmk
 
     def make_noise(self):
         device = self.input.input.device
@@ -1949,7 +1903,7 @@ class _MGenerator(nn.Module):
         return latent
 
     def get_latent(self, input):
-        return self.style(input)
+        return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
 
     def forward(
         self,
@@ -1961,8 +1915,12 @@ class _MGenerator(nn.Module):
         input_is_latent=False,
         noise=None,
         randomize_noise=True,
+        input_is_ssc=False,
+        return_ssc=False,
+        return_img_only=False,
+        return_outs=False,
     ):
-        if not input_is_latent:
+        if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
 
         if noise is None:
@@ -1978,48 +1936,125 @@ class _MGenerator(nn.Module):
 
             for style in styles:
                 style_t.append(
-                    truncation_latent + truncation * (style - truncation_latent)
+                    truncation_latent + truncation *
+                    (style - truncation_latent)
                 )
 
             styles = style_t
 
-        if len(styles) < 2:
-            inject_index = self.n_latent
-
-            if styles[0].ndim < 3:
+        if (not input_is_latent) and (not input_is_ssc):
+            if len(styles) < 2:
+                inject_index = self.n_latent
                 latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
 
             else:
-                latent = styles[0]
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
+
+                latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+                latent2 = styles[1].unsqueeze(1).repeat(
+                    1, self.n_latent - inject_index, 1)
+
+                latent = torch.cat([latent, latent2], 1)
+
+        # input is latent
+        elif input_is_latent:
+            if styles.size(1) == 1:
+                inject_index = self.n_latent
+                latent = styles.repeat(1, inject_index, 1)
+
+            elif styles.size(1) == 2:
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
+
+                latent = styles[:, 0:1].repeat(1, inject_index, 1)
+                latent2 = styles[:, 1:2].repeat(
+                    1, self.n_latent - inject_index, 1)
+
+                latent = torch.cat([latent, latent2], 1)
+
+            else:
+                latent = styles
+
+        # input is stylespace code
+        elif input_is_ssc:
+            latent = styles
+
+        outs = []
+        if not input_is_ssc:
+            ssc = []
+
+            batch = latent.size(0)
+
+            out = self.input(batch)
+            # outs.append(out)
+
+            out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
+            ssc.append(s)
+            outs.append(out)
+
+            _out = out[:, 0:-1].clone()
+            skip, s = self.to_rgb1(_out, latent[:, 1], input_is_ssc=input_is_ssc)
+            ssc.append(s)
+
+            i = 1
+            for conv1, conv2, noise1, noise2, to_rgb in zip(
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+            ):
+                out, s = conv1(_out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+                outs.append(out)
+
+                _out = out[:, 0:-1].clone()
+                out, s = conv2(_out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+                outs.append(out)
+
+                _out = out[:, 0:-1].clone()
+                skip, s = to_rgb(_out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+
+                i += 2
 
         else:
-            if inject_index is None:
-                inject_index = random.randint(1, self.n_latent - 1)
+            batch = latent[0].size(0)
 
-            latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
+            out = self.input(batch)
+            # outs.append(out)
 
-            latent = torch.cat([latent, latent2], 1)
+            out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
+            outs.append(out)
 
-        out = self.input(latent.size(0))
-        out = self.conv1(out, latent[:, 0], noise=noise[0])
+            skip, _ = self.to_rgb1(out[:, 0:-1], latent[1], input_is_ssc=input_is_ssc)
 
-        skip = self.to_rgb1(out, latent[:, 1])
+            i = 2
+            for conv1, conv2, noise1, noise2, to_rgb in zip(
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+            ):
+                out, _ = conv1(out[:, 0:-1], latent[i], noise=noise1, input_is_ssc=input_is_ssc)
+                outs.append(out)
 
-        i = 1
-        for conv1, conv2, noise1, noise2, to_rgb in zip(
-            self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
-        ):
-            out = conv1(out, latent[:, i], noise=noise1)
-            out = conv2(out, latent[:, i + 1], noise=noise2)
-            skip = to_rgb(out, latent[:, i + 2], skip)
+                out, _ = conv2(out[:, 0:-1], latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                outs.append(out)
 
-            i += 2
+                skip, _ = to_rgb(out[:, 0:-1], latent[i + 2], skip, input_is_ssc=input_is_ssc)
+
+                i += 3
+
+            ssc = latent
 
         image = skip
+
+        if return_outs:
+            return outs
+
+        if return_ssc:
+            return image, ssc
+
+        if return_img_only:
+            return image
 
         if return_latents:
             return image, latent
 
-        else:
-            return image, None
+        return image, None
