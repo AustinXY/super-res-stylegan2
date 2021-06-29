@@ -4,7 +4,7 @@ import random
 import os
 import gc
 import copy
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 import numpy as np
 import torch

@@ -4,7 +4,7 @@ import random
 import os
 import gc
 import copy
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 import numpy as np
 import torch
@@ -27,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import MKGenerator, Discriminator
+from model import Generator, Discriminator
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -392,32 +392,28 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
             outs = generator(noise, inject_index=args.injidx, return_outs=True)
 
-            mk_loss = torch.tensor(0.0, device=device)
-            cvg_loss = torch.tensor(0.0, device=device)
-            bin_loss = torch.tensor(0.0, device=device)
+            loss = torch.tensor(0.0, device=device)
             for o in outs:
-                n_channel = o.size(1)-1
-                min_size = args.min_scale * o.size(-1) * o.size(-2)
+                n_channel = o.size(1)
 
-                mk = torch.sigmoid(o[:, n_channel:n_channel+1])
-                rev_mk = torch.ones_like(mk) - mk
+                idx1 = torch.randperm(n_channel//2)
+                g1 = o[:, idx1[0:args.n_samp]]
+                g1 = torch.sum(g1, dim=1)
+                g1 = torch.where(g1 < 0, torch.zeros_like(g1), g1)
 
-                cvg_loss += torch.mean(torch.relu(min_size - torch.sum(mk, dim=(-1,-2))))
-                cvg_loss += torch.mean(torch.relu(min_size - torch.sum(rev_mk, dim=(-1,-2))))
+                idx2 = torch.randperm(n_channel//2) + n_channel//2
+                g2 = o[:, idx2[0:args.n_samp]]
+                g2 = torch.sum(g2, dim=1)
+                g2 = torch.where(g2 < 0, torch.zeros_like(g2), g2)
 
-                bin_loss += torch.mean(torch.minimum(mk, rev_mk))
+                loss += torch.mean(g1 * g2)
 
-                g1 = torch.where(o[:, 0:n_channel//2] >= 0, o[:, 0:n_channel//2], torch.zeros_like(o[:, 0:n_channel//2]))
-                g2 = torch.where(o[:, n_channel//2:n_channel] >= 0, o[:, n_channel//2:n_channel], torch.zeros_like(o[:, n_channel//2:n_channel]))
-                mk_loss += torch.mean(mk * g1) + torch.mean(rev_mk * g2)
+            loss_dict["exc"] = loss
 
-            loss_dict["mk"] = mk_loss
-            loss_dict['cvg'] = cvg_loss
-
-            loss = cvg_loss * args.cvg + mk_loss * args.mk + bin_loss * args.bin
+            _loss = loss * args.exc
 
             generator.zero_grad()
-            loss.backward()
+            _loss.backward()
             g_optim.step()
 
         accumulate(g_ema, g_module, accum)
@@ -431,7 +427,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        mk_loss_val = loss_reduced["mk"].item()
+        mk_loss_val = loss_reduced["exc"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -452,7 +448,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "mk loss": mk_loss_val,
+                        "exclusion loss": mk_loss_val,
                     }
                 )
 
@@ -462,13 +458,20 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     img_noise = g_module.make_noise()
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img, _ = g_ema(noise, inject_index=args.injidx, noise=img_noise)
+                    style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
 
-                    outs = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_outs=True)
-                    mk = torch.sigmoid(outs[-1][:, -1].unsqueeze(1))
+                    noise = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
+
+                    ssc3 = copy.deepcopy(ssc1)
+                    for l in range(len(ssc3)):
+                        channel = ssc3[l].size(2)
+                        ssc3[l][:, :, channel//2:] = ssc2[l][:, :, channel//2:]
+
+                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
                     utils.save_image(
-                        style_img,
+                        style_img1,
                         f"sample/{str(i).zfill(6)}_0.png",
                         nrow=8,
                         normalize=True,
@@ -476,18 +479,27 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        mk,
+                        style_img2,
                         f"sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
-                        range=(0, 1),
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        style_img3,
+                        f"sample/{str(i).zfill(6)}_2.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
                     )
 
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "mask": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "style image1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
+                                "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "mix style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                             }
                         )
 
@@ -503,7 +515,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_3.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_4.pt",
                 )
 
 
@@ -644,6 +656,9 @@ if __name__ == "__main__":
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
     parser.add_argument("--dif_max", type=float, default=5, help="Threshold for dif")
+    parser.add_argument("--exc", type=float, default=1, help="Threshold for dif")
+
+    parser.add_argument("--n_samp", type=int, default=128, help="Threshold for mask")
 
     parser.add_argument("--cvg", type=float, default=1, help="mse weight")
     parser.add_argument("--min_scale", type=float, default=0.2, help="mse weight")
@@ -674,7 +689,7 @@ if __name__ == "__main__":
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
-    generator = MKGenerator(
+    generator = Generator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -686,7 +701,7 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    g_ema = MKGenerator(
+    g_ema = Generator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -760,7 +775,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_3")
+        wandb.init(project="guide 6_4")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device)

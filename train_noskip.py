@@ -4,7 +4,7 @@ import random
 import os
 import gc
 import copy
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 import numpy as np
 import torch
@@ -27,7 +27,8 @@ from distributed import (
     get_world_size,
 )
 
-from model import MKGenerator, Discriminator
+from model import NoSkipGenerator, Discriminator
+from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -200,7 +201,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 def binarization_loss(mask):
-    return torch.minimum(1-mask, mask).mean()
+    return torch.min(1-mask, mask).mean()
 
 
 def fill_mask(mask, pad_px=3):
@@ -231,12 +232,6 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-noises4generate = []
-
-def generate(*ssc):
-    ssc = [s for s in ssc]
-    img, _ = generator(ssc, input_is_ssc=True, noise=noises4generate)
-    return img
 
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
     loader = sample_data(loader)
@@ -272,7 +267,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         ada_augment = AdaptiveAugment(
             args.ada_target, args.ada_length, 8, device)
 
-    # args.injidx = None
+    args.injidx = None
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -382,44 +377,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-
-        ############# guide disentangle #############
-        requires_grad(generator, True)
-
-        guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
-        if guide_regularize:
-            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            outs = generator(noise, inject_index=args.injidx, return_outs=True)
-
-            mk_loss = torch.tensor(0.0, device=device)
-            cvg_loss = torch.tensor(0.0, device=device)
-            bin_loss = torch.tensor(0.0, device=device)
-            for o in outs:
-                n_channel = o.size(1)-1
-                min_size = args.min_scale * o.size(-1) * o.size(-2)
-
-                mk = torch.sigmoid(o[:, n_channel:n_channel+1])
-                rev_mk = torch.ones_like(mk) - mk
-
-                cvg_loss += torch.mean(torch.relu(min_size - torch.sum(mk, dim=(-1,-2))))
-                cvg_loss += torch.mean(torch.relu(min_size - torch.sum(rev_mk, dim=(-1,-2))))
-
-                bin_loss += torch.mean(torch.minimum(mk, rev_mk))
-
-                g1 = torch.where(o[:, 0:n_channel//2] >= 0, o[:, 0:n_channel//2], torch.zeros_like(o[:, 0:n_channel//2]))
-                g2 = torch.where(o[:, n_channel//2:n_channel] >= 0, o[:, n_channel//2:n_channel], torch.zeros_like(o[:, n_channel//2:n_channel]))
-                mk_loss += torch.mean(mk * g1) + torch.mean(rev_mk * g2)
-
-            loss_dict["mk"] = mk_loss
-            loss_dict['cvg'] = cvg_loss
-
-            loss = cvg_loss * args.cvg + mk_loss * args.mk + bin_loss * args.bin
-
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
-
         accumulate(g_ema, g_module, accum)
 
         loss_reduced = reduce_loss_dict(loss_dict)
@@ -431,7 +388,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        mk_loss_val = loss_reduced["mk"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -452,7 +408,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "mk loss": mk_loss_val,
                     }
                 )
 
@@ -464,9 +419,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img, _ = g_ema(noise, inject_index=args.injidx, noise=img_noise)
 
-                    outs = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_outs=True)
-                    mk = torch.sigmoid(outs[-1][:, -1].unsqueeze(1))
-
                     utils.save_image(
                         style_img,
                         f"sample/{str(i).zfill(6)}_0.png",
@@ -475,19 +427,10 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         range=(-1, 1),
                     )
 
-                    utils.save_image(
-                        mk,
-                        f"sample/{str(i).zfill(6)}_1.png",
-                        nrow=8,
-                        normalize=True,
-                        range=(0, 1),
-                    )
-
                     if wandb and args.wandb:
                         wandb.log(
                             {
                                 "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "mask": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                             }
                         )
 
@@ -503,7 +446,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_3.pt",
+                    f"checkpoint/{str(i).zfill(6)}_ns.pt",
                 )
 
 
@@ -546,7 +489,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path_regularize",
         type=float,
-        default=1,
+        default=4,
         help="weight of the path length regularization",
     )
     parser.add_argument(
@@ -640,13 +583,10 @@ if __name__ == "__main__":
     parser.add_argument("--dis1", type=float, default=0.2, help="mse weight")
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
-    parser.add_argument("--bin", type=float, default=10, help="mse weight")
+    parser.add_argument("--bin", type=float, default=1, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
     parser.add_argument("--dif_max", type=float, default=5, help="Threshold for dif")
-
-    parser.add_argument("--cvg", type=float, default=1, help="mse weight")
-    parser.add_argument("--min_scale", type=float, default=0.2, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -665,7 +605,6 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
-    args.outs_thrsh = 0.001
 
     args.start_iter = 0
 
@@ -674,7 +613,7 @@ if __name__ == "__main__":
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
-    generator = MKGenerator(
+    generator = NoSkipGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -686,7 +625,7 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    g_ema = MKGenerator(
+    g_ema = NoSkipGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -716,7 +655,14 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        args.start_iter = ckpt['cur_itr']
+        try:
+            ckpt_name = os.path.basename(args.ckpt)
+            args.start_iter = int(os.path.splitext(ckpt_name)[0])
+
+        except ValueError:
+            args.start_iter = 20000
+
+
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
@@ -760,7 +706,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_3")
+        wandb.init(project="style")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device)
