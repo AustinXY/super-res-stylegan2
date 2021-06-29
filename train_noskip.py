@@ -27,7 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import UNet, Generator, Discriminator, Encoder
+from model import NoSkipGenerator, Discriminator
 from mixnmatch_model import G_NET
 
 from op import conv2d_gradfix
@@ -232,12 +232,6 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-noises4generate = []
-
-def generate(*ssc):
-    ssc = [s for s in ssc]
-    img, _ = generator(ssc, input_is_ssc=True, noise=noises4generate)
-    return img
 
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
     loader = sample_data(loader)
@@ -273,7 +267,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         ada_augment = AdaptiveAugment(
             args.ada_target, args.ada_length, 8, device)
 
-    # args.injidx = None
+    args.injidx = None
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -383,74 +377,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-
-        ############# guide disentangle #############
-        requires_grad(generator, True)
-
-        guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
-        if guide_regularize:
-            with torch.no_grad():
-                img_noise = g_module.make_noise()
-
-                noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc1 = generator(noise1, return_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-                noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc2 = generator(noise2, return_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-                ssc3 = copy.deepcopy(ssc1)
-                for s3, s2 in zip(ssc3, ssc2):
-                    channel = s3.size(2)
-                    s3[:, :, channel//2:] = s2[:, :, channel//2:]
-
-            outs1 = generator(ssc1, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-            outs3 = generator(ssc3, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-            loss = torch.tensor(0.0, device=device)
-            for o1, o3 in zip(outs1, outs3):
-                n_channel = o1.size(1)
-                loss += F.mse_loss(o1[:, 0:n_channel//2], o3[:, 0:n_channel//2])
-
-            loss_dict["fg_out"] = loss
-
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
-
-            with torch.no_grad():
-                img_noise = g_module.make_noise()
-
-                noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc1 = generator(noise1, return_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-                noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc2 = generator(noise2, return_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-                ssc3 = copy.deepcopy(ssc1)
-                for s3, s2 in zip(ssc3, ssc2):
-                    channel = s3.size(2)
-                    s3[:, :, channel//2:] = s2[:, :, channel//2:]
-
-            outs2 = generator(ssc2, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-            outs3 = generator(ssc3, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-            loss = torch.tensor(0.0, device=device)
-            for o2, o3 in zip(outs2, outs3):
-                n_channel = o2.size(1)
-
-                o = o2[:, n_channel//2:] * o3[:, n_channel//2:]
-                mk = torch.where(o < args.outs_thrsh, torch.zeros_like(o), torch.ones_like(o))
-
-                loss += torch.mean(F.mse_loss(o2[:, n_channel//2:], o3[:, n_channel//2:], reduction='none') * mk)
-
-            loss_dict["bg_out"] = loss
-
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
-
-
         accumulate(g_ema, g_module, accum)
 
         loss_reduced = reduce_loss_dict(loss_dict)
@@ -462,8 +388,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        fgout_loss_val = loss_reduced["fg_out"].item()
-        bgout_loss_val = loss_reduced["bg_out"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -484,8 +408,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "fg out sim loss": fgout_loss_val,
-                        "bg out sim loss": bgout_loss_val,
                     }
                 )
 
@@ -495,37 +417,11 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     img_noise = g_module.make_noise()
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
-
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
-
-                    ssc3 = copy.deepcopy(ssc1)
-                    for l in range(len(ssc3)):
-                        channel = ssc3[l].size(2)
-                        ssc3[l][:, :, channel//2:] = ssc2[l][:, :, channel//2:]
-
-                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+                    style_img, _ = g_ema(noise, inject_index=args.injidx, noise=img_noise)
 
                     utils.save_image(
-                        style_img1,
+                        style_img,
                         f"sample/{str(i).zfill(6)}_0.png",
-                        nrow=8,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
-
-                    utils.save_image(
-                        style_img2,
-                        f"sample/{str(i).zfill(6)}_1.png",
-                        nrow=8,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
-
-                    utils.save_image(
-                        style_img3,
-                        f"sample/{str(i).zfill(6)}_2.png",
                         nrow=8,
                         normalize=True,
                         range=(-1, 1),
@@ -534,9 +430,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     if wandb and args.wandb:
                         wandb.log(
                             {
-                                "style image1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
-                                "mix style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                             }
                         )
 
@@ -552,7 +446,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_2.pt",
+                    f"checkpoint/{str(i).zfill(6)}_ns.pt",
                 )
 
 
@@ -595,7 +489,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path_regularize",
         type=float,
-        default=1,
+        default=4,
         help="weight of the path length regularization",
     )
     parser.add_argument(
@@ -711,7 +605,6 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
-    args.outs_thrsh = 0.001
 
     args.start_iter = 0
 
@@ -720,7 +613,7 @@ if __name__ == "__main__":
     args.p_dim = finegan_config[args.ds_name]['SUPER_CATEGORIES']
     args.c_dim = finegan_config[args.ds_name]['FINE_GRAINED_CATEGORIES']
 
-    generator = Generator(
+    generator = NoSkipGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -732,7 +625,7 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    g_ema = Generator(
+    g_ema = NoSkipGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -813,7 +706,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_2")
+        wandb.init(project="style")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device)

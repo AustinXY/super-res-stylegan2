@@ -27,8 +27,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import UNet, Generator, Discriminator, Encoder
-from mixnmatch_model import G_NET
+from model import Generator, Discriminator
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -201,7 +200,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 def binarization_loss(mask):
-    return torch.min(1-mask, mask).mean()
+    return torch.minimum(1-mask, mask).mean()
 
 
 def fill_mask(mask, pad_px=3):
@@ -390,66 +389,38 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
         if guide_regularize:
-            with torch.no_grad():
-                img_noise = g_module.make_noise()
+            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+            outs = generator(noise, inject_index=args.injidx, return_outs=True)
 
-                noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc1 = generator(noise1, return_ssc=True, inject_index=args.injidx, noise=img_noise)
+            exc_loss = torch.tensor(0.0, device=device)
+            cvg_loss = torch.tensor(0.0, device=device)
+            for o in outs[7:]:
+                n_channel = o.size(1)
+                min_size = args.min_scale * o.size(-1) * o.size(-2)
 
-                noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc2 = generator(noise2, return_ssc=True, inject_index=args.injidx, noise=img_noise)
+                g1 = o[:, 0:n_channel//2]
+                _g1 = torch.where(g1 < 0, torch.zeros_like(g1), g1)
+                _g1 = torch.sum(_g1, dim=1)
 
-                ssc3 = copy.deepcopy(ssc1)
-                for s3, s2 in zip(ssc3, ssc2):
-                    channel = s3.size(2)
-                    s3[:, :, channel//2:] = s2[:, :, channel//2:]
+                g2 = o[:, n_channel//2:n_channel]
+                _g2 = torch.where(g2 < 0, torch.zeros_like(g2), g2)
+                _g2 = torch.sum(_g2, dim=1)
 
-            outs1 = generator(ssc1, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-            outs3 = generator(ssc3, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+                exc_loss += torch.mean(_g1 * _g2)
 
-            loss = torch.tensor(0.0, device=device)
-            for o1, o3 in zip(outs1, outs3):
-                n_channel = o1.size(1)
-                loss += F.mse_loss(o1[:, 0:n_channel//2], o3[:, 0:n_channel//2])
+                mk1 = 1 - torch.relu(1 - g1)
+                cvg_loss += torch.mean(torch.relu(min_size - torch.sum(mk1, dim=(-1,-2))))
+                mk2 = 1 - torch.relu(1 - g2)
+                cvg_loss += torch.mean(torch.relu(min_size - torch.sum(mk2, dim=(-1,-2))))
 
-            loss_dict["fg_out"] = loss
+            loss_dict["exc"] = exc_loss
+            loss_dict['cvg'] = cvg_loss
 
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
-
-            with torch.no_grad():
-                img_noise = g_module.make_noise()
-
-                noise1 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc1 = generator(noise1, return_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-                noise2 = mixing_noise(args.batch, args.latent, args.mixing, device)
-                _, ssc2 = generator(noise2, return_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-                ssc3 = copy.deepcopy(ssc1)
-                for s3, s2 in zip(ssc3, ssc2):
-                    channel = s3.size(2)
-                    s3[:, :, channel//2:] = s2[:, :, channel//2:]
-
-            outs2 = generator(ssc2, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-            outs3 = generator(ssc3, return_outs=True, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-
-            loss = torch.tensor(0.0, device=device)
-            for o2, o3 in zip(outs2, outs3):
-                n_channel = o2.size(1)
-
-                o = o2[:, n_channel//2:] * o3[:, n_channel//2:]
-                mk = torch.where(o < args.outs_thrsh, torch.zeros_like(o), torch.ones_like(o))
-
-                loss += torch.mean(F.mse_loss(o2[:, n_channel//2:], o3[:, n_channel//2:], reduction='none') * mk)
-
-            loss_dict["bg_out"] = loss
+            loss = exc_loss * args.exc + cvg_loss + args.cvg
 
             generator.zero_grad()
             loss.backward()
             g_optim.step()
-
 
         accumulate(g_ema, g_module, accum)
 
@@ -462,8 +433,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        fgout_loss_val = loss_reduced["fg_out"].item()
-        bgout_loss_val = loss_reduced["bg_out"].item()
+        exc_loss_val = loss_reduced["exc"].item()
+        cvg_loss_val = loss_reduced["cvg"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -484,8 +455,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "fg out sim loss": fgout_loss_val,
-                        "bg out sim loss": bgout_loss_val,
+                        "exclusion loss": exc_loss_val,
+                        "coverage loss": cvg_loss_val,
                     }
                 )
 
@@ -540,7 +511,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 5000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -552,7 +523,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_2.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_5.pt",
                 )
 
 
@@ -689,10 +660,16 @@ if __name__ == "__main__":
     parser.add_argument("--dis1", type=float, default=0.2, help="mse weight")
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
-    parser.add_argument("--bin", type=float, default=1, help="mse weight")
+    parser.add_argument("--bin", type=float, default=10, help="mse weight")
     parser.add_argument("--mk", type=float, default=1, help="mse weight")
     parser.add_argument("--mp", type=float, default=1, help="mse weight")
     parser.add_argument("--dif_max", type=float, default=5, help="Threshold for dif")
+    parser.add_argument("--exc", type=float, default=1, help="Threshold for dif")
+
+    parser.add_argument("--n_samp", type=int, default=128, help="Threshold for mask")
+
+    parser.add_argument("--cvg", type=float, default=5, help="mse weight")
+    parser.add_argument("--min_scale", type=float, default=0.2, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -762,14 +739,7 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        try:
-            ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
-
-        except ValueError:
-            args.start_iter = 20000
-
-
+        args.start_iter = ckpt['cur_itr']
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
@@ -813,7 +783,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_2")
+        wandb.init(project="guide 6_5")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device)

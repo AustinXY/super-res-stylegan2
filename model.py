@@ -545,6 +545,7 @@ class Generator(nn.Module):
         return_ssc=False,
         return_img_only=False,
         return_outs=False,
+        pass_skip=True,
     ):
         if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
@@ -1784,66 +1785,283 @@ class MuVarEncoder(nn.Module):
         return z, loss
 
 
-class _MuVarEncoder(nn.Module):
-    def __init__(self, blur_kernel=[1, 3, 3, 1]):
+class MKGenerator(nn.Module):
+    def __init__(
+        self,
+        size,
+        style_dim,
+        n_mlp,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        lr_mlp=0.01,
+        use_w_mix=False,
+    ):
         super().__init__()
 
-        channels = {4: 512,
-                    8: 512,
-                    16: 512,
-                    32: 512,
-                    64: 512,
-                    128: 128 * 2,
-                    256: 64 * 2,
-                    512: 32 * 2,
-                    1024: 16 * 2}
+        self.size = size
 
-        self.convs1 = ConvLayer(3, channels[128], 1)
+        self.style_dim = style_dim
 
-        log_size = int(math.log(128, 2))
+        layers = [PixelNorm()]
 
-        in_channel = channels[128]
-        self.convs2 = nn.ModuleList()
-        for i in range(log_size, 2, -1):
-            out_size = 2 ** (i-1)
-            out_channel = channels[out_size]
-            self.convs2.append(_ResBlock(in_channel, out_channel))
+        for _ in range(n_mlp):
+            layers.append(
+                EqualLinear(
+                    style_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
+                )
+            )
+
+        self.style = nn.Sequential(*layers)
+
+        self.channels = {
+            4: 512,
+            8: 512,
+            16: 512,
+            32: 512,
+            64: 256 * channel_multiplier,
+            128: 128 * channel_multiplier,
+            256: 64 * channel_multiplier,
+            512: 32 * channel_multiplier,
+            1024: 16 * channel_multiplier,
+        }
+
+        self.input = ConstantInput(self.channels[4])
+        self.conv1 = StyledConv(
+            self.channels[4], self.channels[4]+1, 3, style_dim, blur_kernel=blur_kernel
+        )
+        self.to_rgb1 = ToRGB(self.channels[4], style_dim, upsample=False)
+
+        self.log_size = int(math.log(size, 2))
+        self.num_layers = (self.log_size - 2) * 2 + 1
+
+        self.convs = nn.ModuleList()
+        self.upsamples = nn.ModuleList()
+        self.to_rgbs = nn.ModuleList()
+        self.noises = nn.Module()
+
+        in_channel = self.channels[4]
+
+        for layer_idx in range(self.num_layers):
+            res = (layer_idx + 5) // 2
+            shape = [1, 1, 2 ** res, 2 ** res]
+            self.noises.register_buffer(
+                f"noise_{layer_idx}", torch.randn(*shape))
+
+        for i in range(3, self.log_size + 1):
+            out_channel = self.channels[2 ** i]
+
+            self.convs.append(
+                StyledConv(
+                    in_channel,
+                    out_channel+1,
+                    3,
+                    style_dim,
+                    upsample=True,
+                    blur_kernel=blur_kernel,
+                )
+            )
+
+            self.convs.append(
+                StyledConv(
+                    out_channel, out_channel+1, 3, style_dim, blur_kernel=blur_kernel
+                )
+            )
+
+            self.to_rgbs.append(ToRGB(out_channel, style_dim))
+
             in_channel = out_channel
 
-        w_over_h = 1
+        self.n_latent = self.log_size * 2 - 2
 
-        self.final_linear = EqualLinear(
-            channels[4] * 4 * 4 * int(w_over_h), channels[4], activation='fused_lrelu')
-        self.mu_linear = EqualLinear(channels[4], 512)
-        self.var_linear = EqualLinear(channels[4], 512)
+        if use_w_mix:
+            self.wpmk = WpMask(self.n_latent, style_dim)
 
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps.mul(std) + mu
+    def mix_wp(self, fg_wp, bg_wp):
+        batch = fg_wp.size(0)
+        wpmk = self.wpmk()
+        fg_mk = wpmk.repeat(batch, 1, 1)
+        bg_mk = torch.ones_like(fg_mk) - fg_mk
+        wp = fg_wp * fg_mk + bg_wp * bg_mk
+        return wp, wpmk
 
-    def get_kl_loss(self, mu, logvar):
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    def make_noise(self):
+        device = self.input.input.device
 
-    def forward(self, input):
-        batch = input.shape[0]
+        noises = [torch.randn(1, 1, 2 ** 2, 2 ** 2, device=device)]
 
-        out = self.convs1(input)
-        for conv in self.convs2:
-            out = conv(out)
+        for i in range(3, self.log_size + 1):
+            for _ in range(2):
+                noises.append(torch.randn(1, 1, 2 ** i, 2 ** i, device=device))
 
-        out = self.final_linear(out.view(batch, -1))
-        mu = self.mu_linear(out)
-        logvar = self.var_linear(out)
-        z = self.reparameterize(mu, logvar)
+        return noises
 
-        # print(z)
-        # sys.exit()
-        loss = self.get_kl_loss(mu, logvar)
-        return [z], loss
+    def mean_latent(self, n_latent):
+        latent_in = torch.randn(
+            n_latent, self.style_dim, device=self.input.input.device
+        )
+        latent = self.style(latent_in).mean(0, keepdim=True)
+
+        return latent
+
+    def get_latent(self, input):
+        return torch.cat([self.style(s).unsqueeze(1) for s in input], dim=1)
+
+    def forward(
+        self,
+        styles,
+        return_latents=False,
+        inject_index=None,
+        truncation=1,
+        truncation_latent=None,
+        input_is_latent=False,
+        noise=None,
+        randomize_noise=True,
+        input_is_ssc=False,
+        return_ssc=False,
+        return_img_only=False,
+        return_outs=False,
+    ):
+        if (not input_is_latent) and (not input_is_ssc):
+            styles = [self.style(s) for s in styles]
+
+        if noise is None:
+            if randomize_noise:
+                noise = [None] * self.num_layers
+            else:
+                noise = [
+                    getattr(self.noises, f"noise_{i}") for i in range(self.num_layers)
+                ]
+
+        if truncation < 1:
+            style_t = []
+
+            for style in styles:
+                style_t.append(
+                    truncation_latent + truncation *
+                    (style - truncation_latent)
+                )
+
+            styles = style_t
+
+        if (not input_is_latent) and (not input_is_ssc):
+            if len(styles) < 2:
+                inject_index = self.n_latent
+                latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+
+            else:
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
+
+                latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+                latent2 = styles[1].unsqueeze(1).repeat(
+                    1, self.n_latent - inject_index, 1)
+
+                latent = torch.cat([latent, latent2], 1)
+
+        # input is latent
+        elif input_is_latent:
+            if styles.size(1) == 1:
+                inject_index = self.n_latent
+                latent = styles.repeat(1, inject_index, 1)
+
+            elif styles.size(1) == 2:
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
+
+                latent = styles[:, 0:1].repeat(1, inject_index, 1)
+                latent2 = styles[:, 1:2].repeat(
+                    1, self.n_latent - inject_index, 1)
+
+                latent = torch.cat([latent, latent2], 1)
+
+            else:
+                latent = styles
+
+        # input is stylespace code
+        elif input_is_ssc:
+            latent = styles
+
+        outs = []
+        if not input_is_ssc:
+            ssc = []
+
+            batch = latent.size(0)
+
+            out = self.input(batch)
+            # outs.append(out)
+
+            out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
+            ssc.append(s)
+            outs.append(out)
+
+            _out = out[:, 0:-1].clone()
+            skip, s = self.to_rgb1(_out, latent[:, 1], input_is_ssc=input_is_ssc)
+            ssc.append(s)
+
+            i = 1
+            for conv1, conv2, noise1, noise2, to_rgb in zip(
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+            ):
+                out, s = conv1(_out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+                outs.append(out)
+
+                _out = out[:, 0:-1].clone()
+                out, s = conv2(_out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+                outs.append(out)
+
+                _out = out[:, 0:-1].clone()
+                skip, s = to_rgb(_out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+                ssc.append(s)
+
+                i += 2
+
+        else:
+            batch = latent[0].size(0)
+
+            out = self.input(batch)
+            # outs.append(out)
+
+            out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
+            outs.append(out)
+
+            skip, _ = self.to_rgb1(out[:, 0:-1], latent[1], input_is_ssc=input_is_ssc)
+
+            i = 2
+            for conv1, conv2, noise1, noise2, to_rgb in zip(
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+            ):
+                out, _ = conv1(out[:, 0:-1], latent[i], noise=noise1, input_is_ssc=input_is_ssc)
+                outs.append(out)
+
+                out, _ = conv2(out[:, 0:-1], latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                outs.append(out)
+
+                skip, _ = to_rgb(out[:, 0:-1], latent[i + 2], skip, input_is_ssc=input_is_ssc)
+
+                i += 3
+
+            ssc = latent
+
+        image = skip
+
+        if return_outs:
+            return outs
+
+        if return_ssc:
+            return image, ssc
+
+        if return_img_only:
+            return image
+
+        if return_latents:
+            return image, latent
+
+        return image, None
 
 
-class _MGenerator(nn.Module):
+class NoSkipGenerator(nn.Module):
     def __init__(
         self,
         size,
@@ -1923,7 +2141,7 @@ class _MGenerator(nn.Module):
                 )
             )
 
-            self.to_rgbs.append(ToRGB(out_channel, style_dim))
+            self.to_rgbs.append(ToRGB(out_channel, style_dim, upsample=False))
 
             in_channel = out_channel
 
@@ -2002,17 +2220,17 @@ class _MGenerator(nn.Module):
             latent = torch.cat([latent, latent2], 1)
 
         out = self.input(latent.size(0))
-        out = self.conv1(out, latent[:, 0], noise=noise[0])
+        out, _ = self.conv1(out, latent[:, 0], noise=noise[0])
 
-        skip = self.to_rgb1(out, latent[:, 1])
+        # skip = self.to_rgb1(out, latent[:, 1])
 
         i = 1
         for conv1, conv2, noise1, noise2, to_rgb in zip(
             self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
         ):
-            out = conv1(out, latent[:, i], noise=noise1)
-            out = conv2(out, latent[:, i + 1], noise=noise2)
-            skip = to_rgb(out, latent[:, i + 2], skip)
+            out, _ = conv1(out, latent[:, i], noise=noise1)
+            out, _ = conv2(out, latent[:, i + 1], noise=noise2)
+            skip, _ = to_rgb(out, latent[:, i + 2])
 
             i += 2
 
