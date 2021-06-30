@@ -1,3 +1,5 @@
+# sum each part (completely), and use result to force exclusion
+
 import argparse
 import math
 import random
@@ -439,7 +441,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                    f"exc: {exc_loss_val:.4f}; cvg: {cvg_loss_val:.4f}; d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                     f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"augment: {ada_aug_p:.4f}"
                 )

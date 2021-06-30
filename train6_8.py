@@ -1,5 +1,5 @@
-# generator generate 4 channel skips (3 c image + 1 c mask)
-# use generated masks (for different layers) to force disentanglement
+# train mknet (generate mask on given image input)
+# use generated masks (resize) to force disentanglement
 
 import argparse
 import math
@@ -7,7 +7,7 @@ import random
 import os
 import gc
 import copy
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 import numpy as np
 import torch
@@ -358,10 +358,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, True)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fnl_skip, _ = generator(noise, inject_index=args.injidx)
-
-        fake_img = fnl_skip[:, 0:3]
-        # fake_mk = fnl_skip[:, 3:4]
+        fake_img, _ = generator(noise, inject_index=args.injidx)
 
         if args.augment:
             real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -412,9 +409,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fnl_skip, _ = generator(noise, inject_index=args.injidx)
-
-        fake_img = fnl_skip[:, 0:3]
+        fake_img, _ = generator(noise, inject_index=args.injidx)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -465,24 +460,13 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # guide_regularize = False
         if guide_regularize:
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            skips, outs = generator(noise, inject_index=args.injidx, return_skips_n_outs=True)
+            style_img, outs = generator(noise, inject_index=args.injidx, return_outs=True)
 
-            fake_img = skips[-1][:, 0:3]
-            fake_mk = skips[-1][:, 3:4]
-
-            real_mk = mknet(fake_img)
-            mk_loss = F.mse_loss(fake_mk, real_mk)
-
-            mk_dict = {}
-            for skip in skips:
-                mk = skip[:, 3:4]
-                mk_dict[mk.size(-1)] = mk
-
+            mask = mknet(style_img)
             sep_loss = torch.tensor(0.0, device=device)
             for o in outs[7:]:
                 n_channel = o.size(1)
-                # _mask = F.interpolate(fake_mk, size=(o.size(-2), o.size(-1)), mode='area')
-                _mask = mk_dict[o.size(-1)]
+                _mask = F.interpolate(mask, size=(o.size(-2), o.size(-1)), mode='area')
                 _rmask = torch.ones_like(_mask) - _mask
 
                 g1 = o[:, 0:n_channel//2]
@@ -492,9 +476,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 sep_loss += F.mse_loss(g2*_rmask, g2)
 
             loss_dict["sep"] = sep_loss
-            loss_dict["g_mk"] = mk_loss
 
-            loss = sep_loss * args.sep + mk_loss * args.mk
+            loss = sep_loss * args.sep
 
             generator.zero_grad()
             loss.backward()
@@ -511,7 +494,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        gmk_loss_val = loss_reduced["g_mk"].item()
         sep_loss_val = loss_reduced["sep"].item()
 
         if get_rank() == 0:
@@ -533,7 +515,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "generator mask loss": gmk_loss_val,
                         "separation loss": sep_loss_val,
                     }
                 )
@@ -542,11 +523,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 with torch.no_grad():
                     g_ema.eval()
                     img_noise = g_module.make_noise()
-
-                    # noise = mixing_noise(8, args.latent, args.mixing, device)
-                    # skips = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_skips=True)
-                    # style_img1 = skips[-1]
-                    # mask2 = skips[-2][:, 3:4]
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
@@ -562,7 +538,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
                     utils.save_image(
-                        style_img1[:,0:3],
+                        style_img1,
                         f"sample/{str(i).zfill(6)}_0.png",
                         nrow=8,
                         normalize=True,
@@ -570,7 +546,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        style_img2[:,0:3],
+                        style_img2,
                         f"sample/{str(i).zfill(6)}_1.png",
                         nrow=8,
                         normalize=True,
@@ -578,7 +554,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        style_img3[:,0:3],
+                        style_img3,
                         f"sample/{str(i).zfill(6)}_2.png",
                         nrow=8,
                         normalize=True,
@@ -608,7 +584,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         'mk': mk_module.state_dict(),
                         'mk_optim': mk_optim.state_dict(),
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_7.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_8.pt",
                 )
 
 
@@ -790,7 +766,7 @@ if __name__ == "__main__":
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
-        im_channel=4,
+        im_channel=3,
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
@@ -804,7 +780,7 @@ if __name__ == "__main__":
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
-        im_channel=4,
+        im_channel=3,
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
@@ -900,7 +876,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_7")
+        wandb.init(project="guide 6_8")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim)

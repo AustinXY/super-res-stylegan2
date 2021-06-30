@@ -388,15 +388,15 @@ class StyledConv(nn.Module):
 
 
 class ToRGB(nn.Module):
-    def __init__(self, in_channel, style_dim, upsample=True, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, in_channel, style_dim, im_channel=3, upsample=True, blur_kernel=[1, 3, 3, 1]):
         super().__init__()
 
         if upsample:
             self.upsample = Upsample(blur_kernel)
 
         self.conv = ModulatedConv2d(
-            in_channel, 3, 1, style_dim, demodulate=False)
-        self.bias = nn.Parameter(torch.zeros(1, 3, 1, 1))
+            in_channel, im_channel, 1, style_dim, demodulate=False)
+        self.bias = nn.Parameter(torch.zeros(1, im_channel, 1, 1))
 
     def forward(self, input, style, skip=None, input_is_ssc=False):
         out, s = self.conv(input, style, input_is_ssc=input_is_ssc)
@@ -416,6 +416,7 @@ class Generator(nn.Module):
         size,
         style_dim,
         n_mlp,
+        im_channel=3,
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
@@ -454,7 +455,7 @@ class Generator(nn.Module):
         self.conv1 = StyledConv(
             self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel
         )
-        self.to_rgb1 = ToRGB(self.channels[4], style_dim, upsample=False)
+        self.to_rgb1 = ToRGB(self.channels[4], style_dim, im_channel=im_channel, upsample=False)
 
         self.log_size = int(math.log(size, 2))
         self.num_layers = (self.log_size - 2) * 2 + 1
@@ -492,7 +493,7 @@ class Generator(nn.Module):
                 )
             )
 
-            self.to_rgbs.append(ToRGB(out_channel, style_dim))
+            self.to_rgbs.append(ToRGB(out_channel, style_dim, im_channel=im_channel))
 
             in_channel = out_channel
 
@@ -545,7 +546,9 @@ class Generator(nn.Module):
         return_ssc=False,
         return_img_only=False,
         return_outs=False,
-        pass_skip=True,
+        return_outs_only=False,
+        return_skips_n_outs=False,
+        return_skips=False,
     ):
         if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
@@ -608,6 +611,7 @@ class Generator(nn.Module):
             latent = styles
 
         outs = []
+        skips = []
         if not input_is_ssc:
             ssc = []
 
@@ -622,6 +626,7 @@ class Generator(nn.Module):
 
             skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
             ssc.append(s)
+            skips.append(skip)
 
             i = 1
             for conv1, conv2, noise1, noise2, to_rgb in zip(
@@ -637,6 +642,7 @@ class Generator(nn.Module):
 
                 skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
                 ssc.append(s)
+                skips.append(skip)
 
                 i += 2
 
@@ -650,6 +656,7 @@ class Generator(nn.Module):
             outs.append(out)
 
             skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
+            skips.append(skip)
 
             i = 2
             for conv1, conv2, noise1, noise2, to_rgb in zip(
@@ -662,6 +669,7 @@ class Generator(nn.Module):
                 outs.append(out)
 
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
+                skips.append(skip)
 
                 i += 3
 
@@ -669,14 +677,23 @@ class Generator(nn.Module):
 
         image = skip
 
+        if return_skips:
+            return skips
+
+        if return_skips_n_outs:
+            return skips, outs
+
         if return_outs:
-            return outs
+            return image, outs
 
         if return_ssc:
             return image, ssc
 
         if return_img_only:
             return image
+
+        if return_outs_only:
+            return outs
 
         if return_latents:
             return image, latent
@@ -751,7 +768,7 @@ class _ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, size, im_channel=3, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
         super().__init__()
 
         channels = {
@@ -766,7 +783,7 @@ class Discriminator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
-        convs = [ConvLayer(3, channels[size], 1)]
+        convs = [ConvLayer(im_channel, channels[size], 1)]
 
         log_size = int(math.log(size, 2))
 

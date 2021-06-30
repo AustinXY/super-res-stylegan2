@@ -1,3 +1,5 @@
+# sum each part (partially), and use result to force exclusion
+
 import argparse
 import math
 import random

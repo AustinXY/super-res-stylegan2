@@ -1,3 +1,5 @@
+# generate a mask for each layer and force separation
+
 import argparse
 import math
 import random
@@ -390,7 +392,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # guide_regularize = False
         if guide_regularize:
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            outs = generator(noise, inject_index=args.injidx, return_outs=True)
+            outs = generator(noise, inject_index=args.injidx, return_outs_only=True)
 
             mk_loss = torch.tensor(0.0, device=device)
             cvg_loss = torch.tensor(0.0, device=device)
