@@ -7,7 +7,7 @@ import random
 import os
 import gc
 import copy
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 import numpy as np
 import torch
@@ -424,6 +424,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         g_optim.step()
 
         g_regularize = i % args.g_reg_every == 0
+        g_regularize = False
 
         if g_regularize:
             path_batch_size = max(1, args.batch // args.path_batch_shrink)
@@ -448,9 +449,11 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 reduce_sum(mean_path_length).item() / get_world_size()
             )
 
-        loss_dict["path"] = path_loss
-        loss_dict["path_length"] = path_lengths.mean()
+        # loss_dict["path"] = path_loss
+        # loss_dict["path_length"] = path_lengths.mean()
 
+        loss_dict["path"] = torch.tensor(0.0, device=device)
+        loss_dict["path_length"] = torch.tensor(0.0, device=device)
 
         # ############# guide disentangle #############
         requires_grad(generator, True)
@@ -723,7 +726,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--bin", type=float, default=10, help="mse weight")
     parser.add_argument("--mk", type=float, default=10, help="mse weight")
-    parser.add_argument("--sep", type=float, default=100, help="mse weight")
+    parser.add_argument("--sep", type=float, default=1000, help="mse weight")
 
     parser.add_argument("--exc", type=float, default=1, help="Threshold for dif")
 
