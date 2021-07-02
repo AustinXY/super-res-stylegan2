@@ -465,9 +465,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         fake_img, ssc = generator(noise, inject_index=args.injidx, return_ssc=True)
-        mask = mknet(fake_img)
+        # mask = mknet(fake_img)
 
-        pred_ssc = encoder(mask)
+        pred_ssc = encoder(fake_img)
 
         enc_loss = torch.tensor(0.0, device=device)
         for pred_s, s in zip(pred_ssc, ssc):
@@ -897,7 +897,7 @@ if __name__ == "__main__":
     encoder = SEncoder(
         size=args.size,
         dim_li = args.dim_li,
-        img_channels=1,
+        img_channels=3,
     ).to(device)
     # encoder = ToyNet().to(device)
 
