@@ -1,4 +1,5 @@
-# using encoder re-predict ssc and ssc std loss to prevent mode collapse
+# by requring first and second image's features of interest to be
+# different to some extent (over some thrsh) to prevent mode collapse
 
 import argparse
 import math
@@ -31,7 +32,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import Generator, Discriminator, UNet, SEncoder, ToyNet
+from model import Generator, Discriminator, UNet
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -288,7 +289,7 @@ def gaussian_noise(img, rerange=True, smooth=True):
     return new_img
 
 
-def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device, segnet, mknet, encoder, mk_optim, enc_optim):
+def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim):
     loader = sample_data(loader)
 
     pbar = range(args.iter)
@@ -311,12 +312,10 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         g_module = generator.module
         d_module = discriminator.module
         mk_module = mknet.module
-        enc_module = encoder.module
     else:
         g_module = generator
         d_module = discriminator
         mk_module = mknet
-        enc_module = encoder
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -329,7 +328,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
     args.injidx = None
     segnet.requires_grad_(False)
     mknet.train()
-    encoder.train()
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -426,7 +424,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         g_optim.step()
 
         g_regularize = i % args.g_reg_every == 0
-        g_regularize = False
 
         if g_regularize:
             path_batch_size = max(1, args.batch // args.path_batch_shrink)
@@ -453,55 +450,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
-
-        ############# predict ssc #############
-        requires_grad(generator, True)
-        requires_grad(encoder, True)
-        requires_grad(mknet, False)
-
-        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, ssc = generator(noise, inject_index=args.injidx, return_ssc=True)
-        # mask = mknet(fake_img)
-
-        pred_ssc = encoder(fake_img)
-
-        enc_loss = torch.tensor(0.0, device=device)
-        for pred_s, s in zip(pred_ssc, ssc):
-            # channel = s.size(1)
-            # enc_loss += F.mse_loss(pred_s, s[:, 0:channel//2])
-            enc_loss += F.mse_loss(pred_s, s)
-
-        loss_dict['enc'] = enc_loss
-        # loss_dict['enc'] = torch.tensor(0.0, device=device)
-
-        loss = enc_loss * args.enc
-
-        generator.zero_grad()
-        encoder.zero_grad()
-        loss.backward()
-        g_optim.step()
-        enc_optim.step()
-
-        ############# ssc std #############
-        requires_grad(generator, True)
-
-        noise = mixing_noise(args.ssc_std_batch, args.latent, args.mixing, device)
-        ssc = generator(noise, inject_index=args.injidx, return_ssc_only=True)
-
-        ssc_std = torch.tensor(0.0, device=device)
-        for s in ssc:
-            ssc_std += torch.std(s) / len(ssc)
-
-        std_loss = torch.relu(args.ssc_std_thrsh - ssc_std)
-
-        loss_dict['std'] = ssc_std
-        # loss_dict['std'] = torch.tensor(0.0, device=device)
-
-        loss = std_loss * args.std
-
-        generator.zero_grad()
-        loss.backward()
-        g_optim.step()
 
 
         # ############# guide disentangle #############
@@ -547,10 +495,13 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             fg_loss = F.mse_loss(fg3, fg1)
             bg_loss = F.mse_loss(bg3, bg2)
 
+            dif_loss = F.relu(args.dif_thrsh - F.mse_loss(mask1, mask2))
+
             loss_dict["fg"] = fg_loss
             loss_dict["bg"] = bg_loss
+            loss_dict['dif'] = dif_loss
 
-            loss = fg_loss * args.fg + bg_loss * args.bg
+            loss = fg_loss * args.fg + bg_loss * args.bg + dif_loss * args.dif
 
             generator.zero_grad()
             loss.backward()
@@ -569,8 +520,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         path_length_val = loss_reduced["path_length"].mean().item()
         fg_loss_val = loss_reduced["fg"].item()
         bg_loss_val = loss_reduced["bg"].item()
-        enc_loss_val = loss_reduced["enc"].item()
-        std_loss_val = loss_reduced["std"].item()
+        dif_loss_val = loss_reduced["dif"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -593,8 +543,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Path Length": path_length_val,
                         "fg sep loss": fg_loss_val,
                         "bg sep loss": bg_loss_val,
-                        "encoder loss": enc_loss_val,
-                        "ssc std loss": std_loss_val,
+                        "mask diff loss": dif_loss_val,
                     }
                 )
 
@@ -672,10 +621,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "cur_itr": i,
                         'mk': mk_module.state_dict(),
                         'mk_optim': mk_optim.state_dict(),
-                        'enc': enc_module.state_dict(),
-                        'enc_optim': enc_optim.state_dict()
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_10.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_11.pt",
                 )
 
 
@@ -705,12 +652,6 @@ if __name__ == "__main__":
     parser.add_argument("--style_dim", type=int, default=512)
     parser.add_argument("--fg_dim", type=int, default=256)
     parser.add_argument("--size", type=int, default=512)
-    parser.add_argument("--scene_size", type=tuple, default=(512, 512),
-                        help='size of image (H*W), used in defining dataset and model')
-    parser.add_argument("--prior_size", type=tuple,
-                        default=(128, 128), help='input size to encoder')
-    parser.add_argument("--starting_height_size", type=int, default=4,
-                        help='encoder feature passed to generator, support 4,8,16,32.')
 
     parser.add_argument(
         "--r1", type=float, default=10, help="weight of the r1 regularization"
@@ -818,8 +759,8 @@ if __name__ == "__main__":
     parser.add_argument("--std", type=float, default=0.1, help="mse weight")
     parser.add_argument("--fg", type=float, default=1, help="mse weight")
     parser.add_argument("--bg", type=float, default=1, help="mse weight")
-    parser.add_argument("--ssc_std_batch", type=int, default=20, help="Threshold for mask")
-    parser.add_argument("--ssc_std_thrsh", type=float, default=4, help="Threshold for mask")
+    parser.add_argument("--dif", type=float, default=0.1, help="Threshold for mask")
+    parser.add_argument("--dif_thrsh", type=float, default=20, help="Threshold for mask diff")
 
     parser.add_argument("--exc", type=float, default=1, help="Threshold for dif")
 
@@ -874,13 +815,6 @@ if __name__ == "__main__":
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
-    with torch.no_grad():
-        noise = mixing_noise(1, args.latent, args.mixing, device)
-        _, ssc = g_ema(noise, return_ssc=True)
-        args.dim_li = []
-        for s in ssc:
-            args.dim_li.append(s.size(1))
-
     segnet = deeplabv3_resnet101(pretrained=True, progress=False).to(device)
     segnet.eval()
 
@@ -890,24 +824,11 @@ if __name__ == "__main__":
         bilinear=True,
     ).to(device)
 
-    encoder = SEncoder(
-        size=args.size,
-        dim_li = args.dim_li,
-        img_channels=3,
-    ).to(device)
-    # encoder = ToyNet().to(device)
-
     g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
 
     mk_optim = optim.Adam(
         mknet.parameters(),
-        lr=args.lr,
-        betas=(0, 0.99),
-    )
-
-    enc_optim = optim.Adam(
-        encoder.parameters(),
         lr=args.lr,
         betas=(0, 0.99),
     )
@@ -957,14 +878,6 @@ if __name__ == "__main__":
             find_unused_parameters=True
         )
 
-        encoder = nn.parallel.DistributedDataParallel(
-            encoder,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-            find_unused_parameters=True
-        )
-
         generator = nn.parallel.DistributedDataParallel(
             generator,
             device_ids=[args.local_rank],
@@ -1000,7 +913,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_10")
+        wandb.init(project="guide 6_11")
 
     train(args, loader, generator, discriminator,
-          g_optim, d_optim, g_ema, device, segnet, mknet, encoder, mk_optim, enc_optim)
+          g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim)
