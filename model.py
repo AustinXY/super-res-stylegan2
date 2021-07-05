@@ -542,6 +542,7 @@ class Generator(nn.Module):
     def forward(
         self,
         styles,
+        input_outs=[],
         return_latents=False,
         inject_index=None,
         truncation=1,
@@ -620,6 +621,7 @@ class Generator(nn.Module):
 
         outs = []
         skips = []
+        oix = 0
         if not input_is_ssc:
             ssc = []
 
@@ -627,10 +629,16 @@ class Generator(nn.Module):
 
             out = self.input(batch)
             outs.append(out)
+            if oix < len(input_outs):
+                out = input_outs[oix]
+                oix += 1
 
             out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
             ssc.append(s)
             outs.append(out)
+            if oix < len(input_outs):
+                out = input_outs[oix]
+                oix += 1
 
             skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
             ssc.append(s)
@@ -643,10 +651,16 @@ class Generator(nn.Module):
                 out, s = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
                 ssc.append(s)
                 outs.append(out)
+                if oix < len(input_outs):
+                    out = input_outs[oix]
+                    oix += 1
 
                 out, s = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
                 ssc.append(s)
                 outs.append(out)
+                if oix < len(input_outs):
+                    out = input_outs[oix]
+                    oix += 1
 
                 skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
                 ssc.append(s)
@@ -659,9 +673,15 @@ class Generator(nn.Module):
 
             out = self.input(batch)
             outs.append(out)
+            if oix < len(input_outs):
+                out = input_outs[oix]
+                oix += 1
 
             out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
             outs.append(out)
+            if oix < len(input_outs):
+                out = input_outs[oix]
+                oix += 1
 
             skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
             skips.append(skip)
@@ -672,9 +692,15 @@ class Generator(nn.Module):
             ):
                 out, _ = conv1(out, latent[i], noise=noise1, input_is_ssc=input_is_ssc)
                 outs.append(out)
+                if oix < len(input_outs):
+                    out = input_outs[oix]
+                    oix += 1
 
                 out, _ = conv2(out, latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
                 outs.append(out)
+                if oix < len(input_outs):
+                    out = input_outs[oix]
+                    oix += 1
 
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
                 skips.append(skip)
