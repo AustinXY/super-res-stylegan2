@@ -32,7 +32,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import Generator, Discriminator, UNet
+from model import Generator, Discriminator, UNet, ToyNet
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -237,7 +237,7 @@ def approx_bin_mask(img, segnet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     return mask
 
 
-def get_mask(model, img, unnorm=False):
+def get_seg_mask(model, img, unnorm=False):
     if unnorm:
         img = un_normalize(img)
     normalized_batch = transforms.functional.normalize(img, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
@@ -254,6 +254,18 @@ def get_mask(model, img, unnorm=False):
     bool_mk = (normalized_masks.argmax(1) == 7)
     return bool_mk.float().unsqueeze(1)
 
+
+def get_mask(mknet, segnet, img):
+    mask_ = get_seg_mask(segnet, img, unnorm=True)
+    mask__ = mknet(img)
+
+    mask = mask_.clone()
+    min_size = mask.size(-1) * mask.size(-2) * 0.1
+    for b in range(img.size(0)):
+        if torch.sum(mask[b]) <= min_size:
+            mask[b] = mask__[b]
+
+    return mask
 
 def norm_ip(img, low, high):
     img_ = img.clamp(min=low, max=high)
@@ -342,7 +354,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         ############# train mask network #############
         requires_grad(mknet, True)
 
-        real_mask = get_mask(segnet, real_img, unnorm=True)
+        real_mask = get_seg_mask(segnet, real_img, unnorm=True)
         fake_mask = mknet(real_img)
 
         mk_loss = F.mse_loss(fake_mask, real_mask)
@@ -452,7 +464,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path_length"] = path_lengths.mean()
 
 
-        # ############# guide disentangle #############
+        ############# guide disentangle #############
         requires_grad(generator, True)
         requires_grad(mknet, False)
 
@@ -475,33 +487,30 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     ssc3[l][:, channel//2:] = ssc2[l][:, channel//2:]
 
             style_img1, _ = generator(ssc1, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-            mask1 = mknet(style_img1)
+            mask1 = get_mask(mknet, segnet, style_img1)
+
             rmask1 = torch.ones_like(mask1) - mask1
 
             style_img2, _ = generator(ssc2, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
-            mask2 = mknet(style_img2)
+            mask2 = get_mask(mknet, segnet, style_img2)
+
             rmask2 = torch.ones_like(mask2) - mask2
 
             style_img3, _ = generator(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
             mult_rmask = rmask1 * rmask2
 
-            fg1 = mask1 * style_img1
-            fg3 = mask1 * style_img3
+            target_img = mask1 * style_img1 + mult_rmask * style_img2
 
-            bg2 = mult_rmask * style_img2
-            bg3 = mult_rmask * style_img3
+            rec_loss = F.mse_loss(style_img3, target_img)
 
-            fg_loss = F.mse_loss(fg3, fg1)
-            bg_loss = F.mse_loss(bg3, bg2)
+            dif_loss = F.relu(args.dif_thrsh - torch.mean(torch.sum(F.mse_loss(mask1, mask2, reduction='none'), dim=(-1,-2,-3))))
 
-            dif_loss = F.relu(args.dif_thrsh - F.mse_loss(mask1, mask2))
-
-            loss_dict["fg"] = fg_loss
-            loss_dict["bg"] = bg_loss
+            loss_dict['rec'] = rec_loss
             loss_dict['dif'] = dif_loss
+            loss_dict['mk_size'] = torch.mean(torch.sum(mask1, dim=(-1,-2,-3)))
 
-            loss = fg_loss * args.fg + bg_loss * args.bg + dif_loss * args.dif
+            loss = rec_loss * args.rec + dif_loss * args.dif
 
             generator.zero_grad()
             loss.backward()
@@ -518,9 +527,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        fg_loss_val = loss_reduced["fg"].item()
-        bg_loss_val = loss_reduced["bg"].item()
+        rec_loss_val = loss_reduced["rec"].item()
         dif_loss_val = loss_reduced["dif"].item()
+        sz_loss_val = loss_reduced["mk_size"].item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -541,9 +550,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "fg sep loss": fg_loss_val,
-                        "bg sep loss": bg_loss_val,
+                        "reconstruction loss": rec_loss_val,
                         "mask diff loss": dif_loss_val,
+                        "mask size": sz_loss_val,
                     }
                 )
 
@@ -554,7 +563,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
-                    mask1 = mknet(style_img1)
+                    mask1 = get_mask(mknet, segnet, style_img1)
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
@@ -757,10 +766,9 @@ if __name__ == "__main__":
 
     parser.add_argument("--enc", type=float, default=0.1, help="mse weight")
     parser.add_argument("--std", type=float, default=0.1, help="mse weight")
-    parser.add_argument("--fg", type=float, default=1, help="mse weight")
-    parser.add_argument("--bg", type=float, default=1, help="mse weight")
+    parser.add_argument("--rec", type=float, default=2, help="mse weight")
     parser.add_argument("--dif", type=float, default=0.1, help="Threshold for mask")
-    parser.add_argument("--dif_thrsh", type=float, default=20, help="Threshold for mask diff")
+    parser.add_argument("--dif_thrsh", type=float, default=100, help="Threshold for mask diff")
 
     parser.add_argument("--exc", type=float, default=1, help="Threshold for dif")
 
@@ -823,6 +831,7 @@ if __name__ == "__main__":
         n_classes=1,
         bilinear=True,
     ).to(device)
+    # mknet = ToyNet().to(device)
 
     g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
