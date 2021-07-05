@@ -535,8 +535,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
                     ssc3 = copy.deepcopy(ssc1)
                     for l in range(len(ssc3)):
-                        channel = ssc3[l].size(2)
-                        ssc3[l][:, :, channel//2:] = ssc2[l][:, :, channel//2:]
+                        channel = ssc3[l].size(1)
+                        ssc3[l][:, channel//2:] = ssc2[l][:, channel//2:]
 
                     style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
