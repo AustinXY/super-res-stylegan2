@@ -189,6 +189,7 @@ class ModulatedConv2d(nn.Module):
         downsample=False,
         blur_kernel=[1, 3, 3, 1],
         fused=True,
+        sep_mode=False,
     ):
         super().__init__()
 
@@ -198,6 +199,7 @@ class ModulatedConv2d(nn.Module):
         self.out_channel = out_channel
         self.upsample = upsample
         self.downsample = downsample
+        self.sep_mode = sep_mode
 
         if upsample:
             factor = 2
@@ -274,7 +276,16 @@ class ModulatedConv2d(nn.Module):
         else:
             style = style.view(batch, 1, in_channel, 1, 1)
 
-        weight = self.scale * self.weight * style
+        if not self.sep_mode:
+            _style = style
+        else:
+            fgc = style[:,:,0:in_channel//2]
+            fgc = fgc.repeat(1,self.out_channel//2,2,1,1)
+            bgc = style[:,:,in_channel//2:]
+            bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
+            _style = torch.cat([fgc, bgc], dim=1)
+
+        weight = self.scale * self.weight * _style
 
         if self.demodulate:
             demod = torch.rsqrt(weight.pow(2).sum([2, 3, 4]) + 1e-8)
@@ -367,6 +378,7 @@ class StyledConv(nn.Module):
         upsample=False,
         blur_kernel=[1, 3, 3, 1],
         demodulate=True,
+        sep_mode=False,
     ):
         super().__init__()
 
@@ -378,6 +390,7 @@ class StyledConv(nn.Module):
             upsample=upsample,
             blur_kernel=blur_kernel,
             demodulate=demodulate,
+            sep_mode=sep_mode,
         )
 
         self.noise = NoiseInjection()
@@ -395,14 +408,14 @@ class StyledConv(nn.Module):
 
 
 class ToRGB(nn.Module):
-    def __init__(self, in_channel, style_dim, im_channel=3, upsample=True, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, in_channel, style_dim, im_channel=3, upsample=True, blur_kernel=[1, 3, 3, 1], sep_mode=False):
         super().__init__()
 
         if upsample:
             self.upsample = Upsample(blur_kernel)
 
         self.conv = ModulatedConv2d(
-            in_channel, im_channel, 1, style_dim, demodulate=False)
+            in_channel, im_channel, 1, style_dim, demodulate=False, sep_mode=False)
         self.bias = nn.Parameter(torch.zeros(1, im_channel, 1, 1))
 
     def forward(self, input, style, skip=None, input_is_ssc=False):
@@ -428,6 +441,7 @@ class Generator(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
         use_w_mix=False,
+        sep_mode=False,
     ):
         super().__init__()
 
@@ -460,9 +474,9 @@ class Generator(nn.Module):
 
         self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
-            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel
+            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode
         )
-        self.to_rgb1 = ToRGB(self.channels[4], style_dim, im_channel=im_channel, upsample=False)
+        self.to_rgb1 = ToRGB(self.channels[4], style_dim, im_channel=im_channel, upsample=False, sep_mode=sep_mode)
 
         self.log_size = int(math.log(size, 2))
         self.num_layers = (self.log_size - 2) * 2 + 1
@@ -491,16 +505,17 @@ class Generator(nn.Module):
                     style_dim,
                     upsample=True,
                     blur_kernel=blur_kernel,
+                    sep_mode=sep_mode,
                 )
             )
 
             self.convs.append(
                 StyledConv(
-                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel
+                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode
                 )
             )
 
-            self.to_rgbs.append(ToRGB(out_channel, style_dim, im_channel=im_channel))
+            self.to_rgbs.append(ToRGB(out_channel, style_dim, im_channel=im_channel, sep_mode=sep_mode))
 
             in_channel = out_channel
 
