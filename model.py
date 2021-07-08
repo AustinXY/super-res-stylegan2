@@ -286,6 +286,7 @@ class ModulatedConv2d(nn.Module):
             _style = torch.cat([fgc, bgc], dim=1)
 
         weight = self.scale * self.weight * _style
+        _weight = weight.clone()
 
         if self.demodulate:
             demod = torch.rsqrt(weight.pow(2).sum([2, 3, 4]) + 1e-8)
@@ -328,7 +329,7 @@ class ModulatedConv2d(nn.Module):
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
 
-        return out, style.view(batch, in_channel)
+        return out, (style.view(batch, in_channel), _weight)
 
 
 class NoiseInjection(nn.Module):
@@ -379,6 +380,7 @@ class StyledConv(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         demodulate=True,
         sep_mode=False,
+        negative_slope=0.2,
     ):
         super().__init__()
 
@@ -396,7 +398,7 @@ class StyledConv(nn.Module):
         self.noise = NoiseInjection()
         # self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
         # self.activate = ScaledLeakyReLU(0.2)
-        self.activate = FusedLeakyReLU(out_channel)
+        self.activate = FusedLeakyReLU(out_channel, negative_slope=negative_slope)
 
     def forward(self, input, style, noise=None, input_is_ssc=False):
         out, s = self.conv(input, style, input_is_ssc=input_is_ssc)
@@ -442,6 +444,7 @@ class Generator(nn.Module):
         lr_mlp=0.01,
         use_w_mix=False,
         sep_mode=False,
+        negative_slope=0.2
     ):
         super().__init__()
 
@@ -474,7 +477,7 @@ class Generator(nn.Module):
 
         self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
-            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode
+            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode, negative_slope=negative_slope
         )
         self.to_rgb1 = ToRGB(self.channels[4], style_dim, im_channel=im_channel, upsample=False, sep_mode=sep_mode)
 
@@ -506,12 +509,13 @@ class Generator(nn.Module):
                     upsample=True,
                     blur_kernel=blur_kernel,
                     sep_mode=sep_mode,
+                    negative_slope=negative_slope,
                 )
             )
 
             self.convs.append(
                 StyledConv(
-                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode
+                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode, negative_slope=negative_slope
                 )
             )
 
@@ -573,6 +577,7 @@ class Generator(nn.Module):
         return_skips_n_outs=False,
         return_skips=False,
         return_ssc_only=False,
+        return_weights=False,
     ):
         if (not input_is_latent) and (not input_is_ssc):
             styles = [self.style(s) for s in styles]
@@ -635,6 +640,7 @@ class Generator(nn.Module):
             latent = styles
 
         outs = []
+        weights = []
         skips = []
         oix = 0
         if not input_is_ssc:
@@ -648,37 +654,47 @@ class Generator(nn.Module):
                 out = input_outs[oix]
                 oix += 1
 
-            out, s = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
+            out, s_n_w = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
+            s, w = s_n_w
             ssc.append(s)
+            weights.append(w)
             outs.append(out)
             if oix < len(input_outs):
                 out = input_outs[oix]
                 oix += 1
 
-            skip, s = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
+            skip, s_n_w = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
+            s, w = s_n_w
             ssc.append(s)
+            # weights.append(w)
             skips.append(skip)
 
             i = 1
             for conv1, conv2, noise1, noise2, to_rgb in zip(
                 self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
             ):
-                out, s = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
+                out, s_n_w = conv1(out, latent[:, i], noise=noise1, input_is_ssc=input_is_ssc)
+                s, w = s_n_w
                 ssc.append(s)
+                weights.append(w)
                 outs.append(out)
                 if oix < len(input_outs):
                     out = input_outs[oix]
                     oix += 1
 
-                out, s = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                out, s_n_w = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
+                s, w = s_n_w
                 ssc.append(s)
+                weights.append(w)
                 outs.append(out)
                 if oix < len(input_outs):
                     out = input_outs[oix]
                     oix += 1
 
-                skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+                skip, s_n_w = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
+                s, w = s_n_w
                 ssc.append(s)
+                # weights.append(w)
                 skips.append(skip)
 
                 i += 2
@@ -740,6 +756,9 @@ class Generator(nn.Module):
 
         if return_ssc_only:
             return ssc
+
+        if return_weights:
+            return image, weights
 
         if return_img_only:
             return image

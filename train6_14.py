@@ -1,7 +1,3 @@
-# train mknet (generate mask on given image input)
-# use generated masks (resize) to force disentanglement
-# using sep mode generator
-
 import argparse
 import math
 import random
@@ -206,7 +202,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
     return z, b, p, c
 
 def binarization_loss(mask):
-    return torch.minimum(1-mask, mask).mean()
+    return torch.min(1-mask, mask).mean()
 
 
 def fill_mask(mask, pad_px=3):
@@ -231,12 +227,11 @@ def process_mask(mask, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     return bin_mask
 
 
-def approx_bin_mask(img, segnet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
+def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     _img = F.interpolate(img, size=(128, 128), mode='area')
-    mask = F.interpolate(segnet(_img), size=(512, 512), mode='area')
+    mask = F.interpolate(mknet(_img), size=(512, 512), mode='area')
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
-
 
 def get_mask(model, img, unnorm=False):
     if unnorm:
@@ -271,23 +266,6 @@ def norm_range(t, value_range=(-1,1)):
 def un_normalize(img):
     img_ = norm_range(img).mul(255).add_(0.5).clamp_(0, 255).to(torch.uint8)
     return convert_image_dtype(img_, dtype=torch.float)
-
-
-def gaussian_noise(img, rerange=True, smooth=True):
-    noise = torch.normal(mean=0, std=0.1, size=img.size()).to(img.device)
-    new_img = noise + img
-
-    if smooth:
-        new_img = transforms.functional.gaussian_blur(new_img, kernel_size=15, sigma=(1., 10.))
-
-    if rerange:
-        size = img.size()
-        new_img = new_img.view(size[0], -1)
-        new_img -= torch.min(new_img, dim=1, keepdim=True)[0]
-        new_img /= torch.max(new_img, dim=1, keepdim=True)[0]
-        new_img = new_img.view(size)
-
-    return new_img
 
 
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim):
@@ -410,7 +388,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(noise, inject_index=args.injidx)
+        fake_img, weights = generator(noise, inject_index=args.injidx, return_weights=True)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -418,14 +396,24 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_pred = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
+        neg_loss = torch.tensor(0.0, device=device)
+        for w in weights:
+            oc = w.size(1)
+            ic = w.size(2)
+
+            neg_loss += torch.sum(F.relu(torch.sum(w[:, 0:oc//2, ic//2:], dim=(-1,-2))))
+            neg_loss += torch.sum(F.relu(torch.sum(w[:, oc//2:, 0:ic//2], dim=(-1,-2))))
+
         loss_dict["g"] = g_loss
+        loss_dict['neg'] = neg_loss
+
+        loss = g_loss + neg_loss * args.neg
 
         generator.zero_grad()
-        g_loss.backward()
+        loss.backward()
         g_optim.step()
 
         g_regularize = i % args.g_reg_every == 0
-        # g_regularize = False
 
         if g_regularize:
             path_batch_size = max(1, args.batch // args.path_batch_shrink)
@@ -495,6 +483,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
+        neg_loss_val = loss_reduced["neg"].mean().item()
         sep_loss_val = loss_reduced["sep"].item()
 
         if get_rank() == 0:
@@ -516,6 +505,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
+                        "weight neg loss": neg_loss_val,
                         "separation loss": sep_loss_val,
                     }
                 )
@@ -581,11 +571,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
-                        "cur_itr": i,
-                        'mk': mk_module.state_dict(),
-                        'mk_optim': mk_optim.state_dict(),
+                        "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_13.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_14.pt",
                 )
 
 
@@ -628,7 +616,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path_regularize",
         type=float,
-        default=1,
+        default=4,
         help="weight of the path length regularization",
     )
     parser.add_argument(
@@ -722,17 +710,10 @@ if __name__ == "__main__":
     parser.add_argument("--dis1", type=float, default=0.2, help="mse weight")
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
-    parser.add_argument("--bin", type=float, default=10, help="mse weight")
-
-
+    parser.add_argument("--neg", type=float, default=10, help="mse weight")
     parser.add_argument("--mk", type=float, default=10, help="mse weight")
     parser.add_argument("--sep", type=float, default=1000, help="mse weight")
 
-
-    parser.add_argument("--n_samp", type=int, default=128, help="Threshold for mask")
-
-    parser.add_argument("--cvg", type=float, default=5, help="mse weight")
-    parser.add_argument("--min_scale", type=float, default=0.2, help="mse weight")
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
     parser.add_argument("--mk_thrsh1", type=float, default=0.3, help="Threshold for mask")
@@ -751,7 +732,6 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
-    args.outs_thrsh = 0.001
 
     args.start_iter = 0
 
@@ -768,14 +748,13 @@ if __name__ == "__main__":
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
-        im_channel=3,
         channel_multiplier=args.channel_multiplier,
         sep_mode=True,
+        negative_slope=0.0001
     ).to(device)
 
     discriminator = Discriminator(
         size=args.size,
-        im_channel=3,
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
@@ -783,9 +762,9 @@ if __name__ == "__main__":
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
-        im_channel=3,
         channel_multiplier=args.channel_multiplier,
         sep_mode=True,
+        negative_slope=0.0001
     ).to(device)
 
     g_ema.eval()
@@ -880,7 +859,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_13")
+        wandb.init(project="guide 6_14")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim)
