@@ -442,7 +442,6 @@ class Generator(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
-        use_w_mix=False,
         sep_mode=False,
         negative_slope=0.2
     ):
@@ -463,30 +462,30 @@ class Generator(nn.Module):
 
         self.style = nn.Sequential(*layers)
 
-        # self.channels = {
-        #     4: 512,
-        #     8: 512,
-        #     16: 512,
-        #     32: 512,
-        #     64: 256 * channel_multiplier,
-        #     128: 128 * channel_multiplier,
-        #     256: 64 * channel_multiplier,
-        #     512: 32 * channel_multiplier,
-        #     1024: 16 * channel_multiplier,
-        # }
-
-        #################################
         self.channels = {
-            4: 128,
-            8: 128,
-            16: 128,
-            32: 128,
-            64: 64 * channel_multiplier,
-            128: 32 * channel_multiplier,
+            4: 512,
+            8: 512,
+            16: 512,
+            32: 512,
+            64: 256 * channel_multiplier,
+            128: 128 * channel_multiplier,
             256: 64 * channel_multiplier,
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
         }
+
+        #################################
+        # self.channels = {
+        #     4: 128,
+        #     8: 128,
+        #     16: 128,
+        #     32: 128,
+        #     64: 64 * channel_multiplier,
+        #     128: 32 * channel_multiplier,
+        #     256: 64 * channel_multiplier,
+        #     512: 32 * channel_multiplier,
+        #     1024: 16 * channel_multiplier,
+        # }
         #################################
 
         self.input = ConstantInput(self.channels[4])
@@ -539,17 +538,6 @@ class Generator(nn.Module):
 
         self.n_latent = self.log_size * 2 - 2
 
-        if use_w_mix:
-            self.wpmk = WpMask(self.n_latent, style_dim)
-
-    def mix_wp(self, fg_wp, bg_wp):
-        batch = fg_wp.size(0)
-        wpmk = self.wpmk()
-        fg_mk = wpmk.repeat(batch, 1, 1)
-        bg_mk = torch.ones_like(fg_mk) - fg_mk
-        wp = fg_wp * fg_mk + bg_wp * bg_mk
-        return wp, wpmk
-
     def make_noise(self):
         device = self.input.input.device
 
@@ -575,7 +563,8 @@ class Generator(nn.Module):
     def forward(
         self,
         styles,
-        input_outs=[],
+        input_feats=[],
+        starting_features=None,
         return_latents=False,
         inject_index=None,
         truncation=1,
@@ -586,9 +575,9 @@ class Generator(nn.Module):
         input_is_ssc=False,
         return_ssc=False,
         return_img_only=False,
-        return_outs=False,
-        return_outs_only=False,
-        return_skips_n_outs=False,
+        return_feats=False,
+        return_feats_only=False,
+        return_skips_n_feats=False,
         return_skips=False,
         return_ssc_only=False,
         return_weights=False,
@@ -653,7 +642,7 @@ class Generator(nn.Module):
         elif input_is_ssc:
             latent = styles
 
-        outs = []
+        feats = []
         weights = []
         skips = []
         oix = 0
@@ -662,19 +651,22 @@ class Generator(nn.Module):
 
             batch = latent.size(0)
 
-            out = self.input(batch)
-            outs.append(out)
-            if oix < len(input_outs):
-                out = input_outs[oix]
+            out = starting_features
+            if starting_features is None:
+                out = self.input(batch)
+
+            feats.append(out)
+            if oix < len(input_feats):
+                out = input_feats[oix]
                 oix += 1
 
             out, s_n_w = self.conv1(out, latent[:, 0], noise=noise[0], input_is_ssc=input_is_ssc)
             s, w = s_n_w
             ssc.append(s)
             weights.append(w)
-            outs.append(out)
-            if oix < len(input_outs):
-                out = input_outs[oix]
+            feats.append(out)
+            if oix < len(input_feats):
+                out = input_feats[oix]
                 oix += 1
 
             skip, s_n_w = self.to_rgb1(out, latent[:, 1], input_is_ssc=input_is_ssc)
@@ -691,18 +683,18 @@ class Generator(nn.Module):
                 s, w = s_n_w
                 ssc.append(s)
                 weights.append(w)
-                outs.append(out)
-                if oix < len(input_outs):
-                    out = input_outs[oix]
+                feats.append(out)
+                if oix < len(input_feats):
+                    out = input_feats[oix]
                     oix += 1
 
                 out, s_n_w = conv2(out, latent[:, i + 1], noise=noise2, input_is_ssc=input_is_ssc)
                 s, w = s_n_w
                 ssc.append(s)
                 weights.append(w)
-                outs.append(out)
-                if oix < len(input_outs):
-                    out = input_outs[oix]
+                feats.append(out)
+                if oix < len(input_feats):
+                    out = input_feats[oix]
                     oix += 1
 
                 skip, s_n_w = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
@@ -716,16 +708,19 @@ class Generator(nn.Module):
         else:
             batch = latent[0].size(0)
 
-            out = self.input(batch)
-            outs.append(out)
-            if oix < len(input_outs):
-                out = input_outs[oix]
+            out = starting_features
+            if starting_features is None:
+                out = self.input(batch)
+
+            feats.append(out)
+            if oix < len(input_feats):
+                out = input_feats[oix]
                 oix += 1
 
             out, _ = self.conv1(out, latent[0], noise=noise[0], input_is_ssc=input_is_ssc)
-            outs.append(out)
-            if oix < len(input_outs):
-                out = input_outs[oix]
+            feats.append(out)
+            if oix < len(input_feats):
+                out = input_feats[oix]
                 oix += 1
 
             skip, _ = self.to_rgb1(out, latent[1], input_is_ssc=input_is_ssc)
@@ -736,15 +731,15 @@ class Generator(nn.Module):
                 self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
             ):
                 out, _ = conv1(out, latent[i], noise=noise1, input_is_ssc=input_is_ssc)
-                outs.append(out)
-                if oix < len(input_outs):
-                    out = input_outs[oix]
+                feats.append(out)
+                if oix < len(input_feats):
+                    out = input_feats[oix]
                     oix += 1
 
                 out, _ = conv2(out, latent[i + 1], noise=noise2, input_is_ssc=input_is_ssc)
-                outs.append(out)
-                if oix < len(input_outs):
-                    out = input_outs[oix]
+                feats.append(out)
+                if oix < len(input_feats):
+                    out = input_feats[oix]
                     oix += 1
 
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
@@ -759,11 +754,11 @@ class Generator(nn.Module):
         if return_skips:
             return skips
 
-        if return_skips_n_outs:
-            return skips, outs
+        if return_skips_n_feats:
+            return skips, feats
 
-        if return_outs:
-            return image, outs
+        if return_feats:
+            return image, feats
 
         if return_ssc:
             return image, ssc
@@ -777,8 +772,8 @@ class Generator(nn.Module):
         if return_img_only:
             return image
 
-        if return_outs_only:
-            return outs
+        if return_feats_only:
+            return feats
 
         if return_latents:
             return image, latent
@@ -2317,3 +2312,155 @@ class SEncoder(nn.Module):
             ssc.append(fc(out))
 
         return ssc
+
+
+# class SmallUnet(nn.Module):
+#     "Here we aggregate feature from different resolution. It is actually an up branch of Unet"
+#     def __init__(self, size_to_channel):
+#         super().__init__()
+
+#         self.convs = nn.ModuleList()
+
+#         size = 4
+#         extra_channel = 0
+
+#         for i in range(len(size_to_channel)):
+#             in_channel = size_to_channel[size] + extra_channel
+#             upsample = i != (len(size_to_channel)-1)
+#             self.convs.append(ConvLayer(in_channel, 512, 3, upsample=upsample))
+#             size *= 2
+#             extra_channel = 512
+
+#     def forward(self, feature_list):
+#         "feature_list should be ordered from small to big: BS*C1*4*?, BS*C2*8*?, BS*C3*16*?,..."
+
+#         for conv, feature in zip(self.convs, feature_list):
+#             if feature.shape[2] != 4:
+#                 feature = torch.cat([feature,previos], dim=1)
+#             previos = conv(feature)
+
+#         return previos
+
+
+class StarttingFeatureEncoder(nn.Module):
+    def __init__(self, size, out_feature_size, channel_multiplier=2):
+        super().__init__()
+        self.out_feature_size = out_feature_size
+        channels = {4: 512,
+                    8: 512,
+                    16: 512,
+                    32: 512,
+                    64: 512,
+                    128: 128 * channel_multiplier,
+                    256: 64 * channel_multiplier,
+                    512: 32 * channel_multiplier,
+                    1024: 16 * channel_multiplier}
+
+        self.convs1 = ConvLayer(3, channels[size], 1)
+
+        log_size = int(math.log(size, 2))
+
+        in_channel = channels[size]
+
+        self.convs2 = nn.ModuleList()
+        for i in range(log_size, 2, -1):
+            out_size = 2 ** (i-1)
+            out_channel = channels[out_size]
+            self.convs2.append(_ResBlock(in_channel, out_channel))
+            in_channel = out_channel
+            if out_channel == out_feature_size:
+                break
+
+        # self.unet = SmallUnet(size_to_channel)
+
+    def forward(self, input):
+        out = self.convs1(input)
+        for conv in self.convs2:
+            out = conv(out)
+
+        return out
+
+
+class TwoStageGenerator(nn.Module):
+    def __init__(
+        self,
+        size,
+        style_dim,
+        n_mlp,
+        im_channel=3,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        lr_mlp=0.01,
+        sep_mode=False,
+        negative_slope=0.2
+        ):
+        super().__init__()
+
+        self.fg_generator = Generator(
+            size=size,
+            style_dim=style_dim,
+            n_mlp=n_mlp,
+            im_channel=im_channel,
+            channel_multiplier=channel_multiplier,
+            blur_kernel=blur_kernel,
+            lr_mlp=lr_mlp,
+            sep_mode=sep_mode,
+            negative_slope=negative_slope
+        )
+
+        self.bg_generator = Generator(
+            size=size,
+            style_dim=style_dim,
+            n_mlp=n_mlp,
+            im_channel=im_channel,
+            channel_multiplier=channel_multiplier,
+            blur_kernel=blur_kernel,
+            lr_mlp=lr_mlp,
+            sep_mode=sep_mode,
+            negative_slope=negative_slope
+        )
+
+        self.fg_encoder = StarttingFeatureEncoder(
+            size=size,
+            out_feature_size=4,
+            channel_multiplier=channel_multiplier
+        )
+
+    def forward(
+        self,
+        fg_styles,
+        bg_styles,
+        input_feats=[],
+        starting_features=None,
+        return_latents=False,
+        inject_index=None,
+        truncation=1,
+        truncation_latent=None,
+        input_is_latent=False,
+        noise=None,
+        randomize_noise=True,
+        input_is_ssc=False,
+        return_ssc=False,
+        return_img_only=False,
+        return_feats=False,
+        return_feats_only=False,
+        return_skips_n_feats=False,
+        return_skips=False,
+        return_ssc_only=False,
+        return_weights=False,
+        ):
+
+        fg_img, fg_out = self.fg_generator(
+            fg_styles,
+            )
+
+        bg_starting_features = self.fg_encoder(fg_img)
+
+        bg_img, bg_out = self.bg_generator(
+            bg_styles,
+            starting_features=bg_starting_features
+        )
+
+        fnl_img = fg_img + bg_img
+        img = torch.cat([fg_img, bg_img, fnl_img], dim=1)
+        return img, (fg_out, bg_out)
