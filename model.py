@@ -477,12 +477,12 @@ class Generator(nn.Module):
 
         #################################
         self.channels = {
-            4: 64,
-            8: 64,
-            16: 64,
-            32: 64,
-            64: 32 * channel_multiplier,
-            128: 16 * channel_multiplier,
+            4: 128,
+            8: 128,
+            16: 128,
+            32: 128,
+            64: 64 * channel_multiplier,
+            128: 32 * channel_multiplier,
             256: 64 * channel_multiplier,
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
