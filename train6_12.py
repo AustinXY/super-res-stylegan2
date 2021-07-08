@@ -792,7 +792,7 @@ if __name__ == "__main__":
         n_mlp=args.n_mlp,
         im_channel=3,
         channel_multiplier=args.channel_multiplier,
-
+        sep_mode=True,
     ).to(device)
 
     discriminator = Discriminator(
@@ -806,7 +806,8 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         im_channel=3,
-        channel_multiplier=args.channel_multiplier
+        channel_multiplier=args.channel_multiplier,
+        sep_mode=True,
     ).to(device)
 
     g_ema.eval()
