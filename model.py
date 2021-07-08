@@ -463,17 +463,31 @@ class Generator(nn.Module):
 
         self.style = nn.Sequential(*layers)
 
+        # self.channels = {
+        #     4: 512,
+        #     8: 512,
+        #     16: 512,
+        #     32: 512,
+        #     64: 256 * channel_multiplier,
+        #     128: 128 * channel_multiplier,
+        #     256: 64 * channel_multiplier,
+        #     512: 32 * channel_multiplier,
+        #     1024: 16 * channel_multiplier,
+        # }
+
+        #################################
         self.channels = {
-            4: 512,
-            8: 512,
-            16: 512,
-            32: 512,
-            64: 256 * channel_multiplier,
-            128: 128 * channel_multiplier,
+            4: 64,
+            8: 64,
+            16: 64,
+            32: 64,
+            64: 32 * channel_multiplier,
+            128: 16 * channel_multiplier,
             256: 64 * channel_multiplier,
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
         }
+        #################################
 
         self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
