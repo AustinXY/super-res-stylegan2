@@ -279,8 +279,8 @@ class ModulatedConv2d(nn.Module):
             if not self.sep_mode:
                 style = self.modulation(style)
             else:
-                style = torch.cat([self.modulation(style[:, 0:self.style_dim//2],
-                                                   style[:, self.style_dim//2:])], dim=1)
+                style = torch.cat([self.modulation(style[:, 0:self.style_dim//2]),
+                                   self.modulation(style[:, self.style_dim//2:])], dim=1)
 
         style = style.view(batch, 1, in_channel, 1, 1)
         if not self.sep_mode:
@@ -2498,6 +2498,9 @@ class SepGenerator(nn.Module):
             sep_mode=True,
             negative_slope=negative_slope
         )
+
+    def make_noise(self):
+        return self.generator.make_noise()
 
     def forward(
         self,

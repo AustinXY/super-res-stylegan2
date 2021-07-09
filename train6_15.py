@@ -479,6 +479,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
+        sep_loss_val = loss_reduced["sep"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -499,6 +500,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
+                        "Separation loss": sep_loss_val,
                     }
                 )
 
