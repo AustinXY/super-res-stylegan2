@@ -1,3 +1,6 @@
+# using two stage generator: generate fg first, then use encoder to generate
+# starting feature maps for bg stage
+
 import argparse
 import math
 import random
@@ -477,22 +480,23 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 with torch.no_grad():
                     g_ema.eval()
 
-                    fg_noise = mixing_noise(8, args.latent, args.mixing, device)
-                    bg_noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, _ = g_ema(fg_noise, bg_noise, inject_index=args.injidx)
+                    noise1 = mixing_noise(8, args.latent, args.mixing, device)
+                    noise2 = mixing_noise(8, args.latent, args.mixing, device)
+                    noise3 = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img1, _ = g_ema(noise1, noise2, inject_index=args.injidx)
                     fg_img = style_img1[:, 0:3]
                     bg_img = style_img1[:, 3:6]
                     fnl_img = style_img1[:, 6:9]
 
                     # noise = mixing_noise(8, args.latent, args.mixing, device)
-                    # style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
+                    style_img2, _ = g_ema(noise1, noise3, inject_index=args.injidx)
 
                     # ssc3 = copy.deepcopy(ssc1)
                     # for l in range(len(ssc3)):
                     #     channel = ssc3[l].size(1)
                     #     ssc3[l][:, channel//2:] = ssc2[l][:, channel//2:]
 
-                    # style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+                    style_img3, _ = g_ema(noise3, noise2, inject_index=args.injidx)
 
                     utils.save_image(
                         fg_img,
@@ -518,12 +522,29 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         range=(-1, 1),
                     )
 
+                    utils.save_image(
+                        style_img2[:, 6:9],
+                        f"sample/{str(i).zfill(6)}_3.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        style_img3[:, 6:9],
+                        f"sample/{str(i).zfill(6)}_4.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
                     if wandb and args.wandb:
                         wandb.log(
                             {
                                 "fg image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
                                 "bg image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "fnl image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "same fg": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "same bg": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
                             }
                         )
 
@@ -717,6 +738,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
+        starting_feature_size=16,
     ).to(device)
 
     discriminator = Discriminator(
@@ -730,6 +752,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
+        starting_feature_size=16,
     ).to(device)
 
     g_ema.eval()
