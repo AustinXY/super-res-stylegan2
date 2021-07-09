@@ -461,6 +461,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             sep_loss += F.mse_loss(bg_feats*_rmask, bg_feats)
 
             loss_dict["sep"] = sep_loss
+            loss_dict["fg_f"] = torch.sum(fg_feats)
+            loss_dict["bg_f"] = torch.sum(bg_feats)
 
             loss = sep_loss * args.sep
 
@@ -480,6 +482,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         sep_loss_val = loss_reduced["sep"].mean().item()
+        fgf_loss_val = loss_reduced["fg_f"].mean().item()
+        bgf_loss_val = loss_reduced["bg_f"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -501,6 +505,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "Separation loss": sep_loss_val,
+                        "fg feature sum": fgf_loss_val,
+                        "bg feature sum": bgf_loss_val,
                     }
                 )
 
@@ -512,8 +518,11 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     img_noise = g_module.make_noise()
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
-                    mask = mknet(style_img)
+                    img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True, return_separately=True)
+                    fg_img1 = img1[0]
+                    bg_img1 = img1[1]
+                    style_img1 = img1[2]
+                    mask = mknet(style_img1)
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
@@ -557,6 +566,21 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         range=(0, 1),
                     )
 
+                    utils.save_image(
+                        fg_img1,
+                        f"sample/{str(i).zfill(6)}_4.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        bg_img1,
+                        f"sample/{str(i).zfill(6)}_5.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
                     if wandb and args.wandb:
                         wandb.log(
                             {
@@ -564,17 +588,21 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                                 "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
                                 "mix style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
                                 "mask": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
+                                "fg1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_4.png").convert("RGB"))],
+                                "bg1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_5.png").convert("RGB"))],
                             }
                         )
 
-            if i % 10000 == 0 and i != args.start_iter:
+            if i % 4000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
                         "d": d_module.state_dict(),
                         "g_ema": g_ema.state_dict(),
+                        "mk": mk_module.state_dict(),
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
+                        "mk_optim": mk_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
