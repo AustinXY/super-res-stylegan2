@@ -463,11 +463,13 @@ class Generator(nn.Module):
         sep_mode=False,
         negative_slope=0.2,
         starting_feature_size=4,
+        no_skip=False,
     ):
         super().__init__()
 
         self.size = size
         self.sep_mode = sep_mode
+        self.no_skip = no_skip
 
         self.style_dim = style_dim
 
@@ -721,6 +723,8 @@ class Generator(nn.Module):
                     out = input_feats[oix]
                     oix += 1
 
+                if self.no_skip:
+                    skip = None
                 skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
                 ssc.append(s)
                 skips.append(skip)
@@ -764,6 +768,8 @@ class Generator(nn.Module):
                     out = input_feats[oix]
                     oix += 1
 
+                if self.no_skip:
+                    skip = None
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
                 skips.append(skip)
 
@@ -2495,6 +2501,7 @@ class SepGenerator(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
         negative_slope=0.2,
+        no_skip=False,
         ):
         super().__init__()
 
@@ -2507,7 +2514,8 @@ class SepGenerator(nn.Module):
             blur_kernel=blur_kernel,
             lr_mlp=lr_mlp,
             sep_mode=True,
-            negative_slope=negative_slope
+            negative_slope=negative_slope,
+            no_skip=no_skip
         )
 
     def make_noise(self):

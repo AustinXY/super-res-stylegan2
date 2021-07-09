@@ -442,27 +442,20 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # guide_regularize = False
         if guide_regularize:
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            style_img, feats = generator(noise, inject_index=args.injidx, return_feats=True)
+            imgs, _ = generator(noise, inject_index=args.injidx, return_separately=True)
+
+            fg_img, bg_img, style_img = imgs
 
             _mask = mknet(style_img)
             # sep_loss = torch.tensor(0.0, device=device)
 
-            f = feats[-1]
-
-            n_channel = f.size(1)
-
             # _mask = F.interpolate(mask, size=(f.size(-2), f.size(-1)), mode='area')
             _rmask = torch.ones_like(_mask) - _mask
 
-            fg_feats = f[:, 0:n_channel//2]
-            bg_feats = f[:, n_channel//2:n_channel]
-
-            sep_loss = F.mse_loss(fg_feats*_mask, fg_feats)
-            sep_loss += F.mse_loss(bg_feats*_rmask, bg_feats)
+            sep_loss = F.mse_loss(fg_img*_mask, fg_img)
+            sep_loss += F.mse_loss(bg_img*_rmask, bg_img)
 
             loss_dict["sep"] = sep_loss
-            loss_dict["fg_f"] = torch.sum(fg_feats)
-            loss_dict["bg_f"] = torch.sum(bg_feats)
 
             loss = sep_loss * args.sep
 
@@ -482,8 +475,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         sep_loss_val = loss_reduced["sep"].mean().item()
-        fgf_loss_val = loss_reduced["fg_f"].mean().item()
-        bgf_loss_val = loss_reduced["bg_f"].mean().item()
+        # fgf_loss_val = loss_reduced["fg_f"].mean().item()
+        # bgf_loss_val = loss_reduced["bg_f"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -505,8 +498,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "Separation loss": sep_loss_val,
-                        "fg feature sum": fgf_loss_val,
-                        "bg feature sum": bgf_loss_val,
+                        # "fg feature sum": fgf_loss_val,
+                        # "bg feature sum": bgf_loss_val,
                     }
                 )
 
@@ -518,10 +511,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     img_noise = g_module.make_noise()
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
-                    img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True, return_separately=True)
-                    fg_img1 = img1[0]
-                    bg_img1 = img1[1]
-                    style_img1 = img1[2]
+                    imgs1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True, return_separately=True)
+                    fg_img1, bg_img1, style_img1 = imgs1
                     mask = mknet(style_img1)
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
@@ -593,7 +584,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                             }
                         )
 
-            if i % 4000 == 0 and i != args.start_iter:
+            if i % 10000 == 0 and i != args.start_iter:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -752,7 +743,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--neg", type=float, default=10, help="mse weight")
     parser.add_argument("--mk", type=float, default=10, help="mse weight")
-    parser.add_argument("--sep", type=float, default=1000, help="mse weight")
+    parser.add_argument("--sep", type=float, default=10, help="mse weight")
 
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
@@ -789,6 +780,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
+        no_skip=True,
     ).to(device)
 
     discriminator = Discriminator(
@@ -801,6 +793,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
+        no_skip=True,
     ).to(device)
 
     g_ema.eval()
