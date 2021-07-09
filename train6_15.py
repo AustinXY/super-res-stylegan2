@@ -1,3 +1,5 @@
+# using sep mode
+
 import argparse
 import math
 import random
@@ -29,7 +31,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import Generator, Discriminator, UNet
+from model import SepGenerator, Discriminator, UNet
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -306,7 +308,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
     args.injidx = None
     segnet.requires_grad_(False)
-    mknet.train()
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -319,6 +320,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_img = real_img.to(device)
 
         ############# train mask network #############
+        mknet.train()
         requires_grad(mknet, True)
 
         real_mask = get_mask(segnet, real_img, unnorm=True)
@@ -331,9 +333,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         mknet.zero_grad()
         mk_loss.backward()
         mk_optim.step()
-
-        with torch.no_grad():
-            real_img *= fake_mask
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -407,33 +406,67 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss.backward()
         g_optim.step()
 
-        g_regularize = i % args.g_reg_every == 0
+        # g_regularize = i % args.g_reg_every == 0
 
-        if g_regularize:
-            path_batch_size = max(1, args.batch // args.path_batch_shrink)
-            noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
-            fake_img, latents = generator(noise, return_latents=True, inject_index=args.injidx)
+        # if g_regularize:
+        #     path_batch_size = max(1, args.batch // args.path_batch_shrink)
+        #     noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
+        #     fake_img, latents = generator(noise, return_latents=True, inject_index=args.injidx)
 
-            path_loss, mean_path_length, path_lengths = g_path_regularize(
-                fake_img, latents, mean_path_length
-            )
+        #     path_loss, mean_path_length, path_lengths = g_path_regularize(
+        #         fake_img, latents, mean_path_length
+        #     )
 
-            generator.zero_grad()
-            weighted_path_loss = args.path_regularize * path_loss
+        #     generator.zero_grad()
+        #     weighted_path_loss = args.path_regularize * path_loss
 
-            if args.path_batch_shrink:
-                weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
+        #     if args.path_batch_shrink:
+        #         weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
 
-            weighted_path_loss.backward()
+        #     weighted_path_loss.backward()
 
-            g_optim.step()
+        #     g_optim.step()
 
-            mean_path_length_avg = (
-                reduce_sum(mean_path_length).item() / get_world_size()
-            )
+        #     mean_path_length_avg = (
+        #         reduce_sum(mean_path_length).item() / get_world_size()
+        #     )
 
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
+
+        # ############# guide disentangle #############
+        requires_grad(generator, True)
+        requires_grad(mknet, False)
+
+        guide_regularize = i % args.guide_reg_every == 0
+        # guide_regularize = False
+        if guide_regularize:
+            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+            style_img, feats = generator(noise, inject_index=args.injidx, return_feats=True)
+
+            _mask = mknet(style_img)
+            # sep_loss = torch.tensor(0.0, device=device)
+
+            f = feats[-1]
+
+            n_channel = f.size(1)
+
+            # _mask = F.interpolate(mask, size=(f.size(-2), f.size(-1)), mode='area')
+            _rmask = torch.ones_like(_mask) - _mask
+
+            fg_feats = f[:, 0:n_channel//2]
+            bg_feats = f[:, n_channel//2:n_channel]
+
+            sep_loss = F.mse_loss(fg_feats*_mask, fg_feats)
+            sep_loss += F.mse_loss(bg_feats*_rmask, bg_feats)
+
+            loss_dict["sep"] = sep_loss
+
+            loss = sep_loss * args.sep
+
+            generator.zero_grad()
+            loss.backward()
+            g_optim.step()
 
         accumulate(g_ema, g_module, accum)
 
@@ -472,20 +505,23 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             if i % 500 == 0:
                 with torch.no_grad():
                     g_ema.eval()
+                    mknet.eval()
+
                     img_noise = g_module.make_noise()
 
                     noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
+                    mask = mknet(style_img)
 
-                    # noise = mixing_noise(8, args.latent, args.mixing, device)
-                    # style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
+                    noise = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
 
-                    # ssc3 = copy.deepcopy(ssc1)
-                    # for l in range(len(ssc3)):
-                    #     channel = ssc3[l].size(1)
-                    #     ssc3[l][:, channel//2:] = ssc2[l][:, channel//2:]
+                    ssc3 = copy.deepcopy(ssc1)
+                    for l in range(len(ssc3)):
+                        channel = ssc3[l].size(1)
+                        ssc3[l][:, channel//2:] = ssc2[l][:, channel//2:]
 
-                    # style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
 
                     utils.save_image(
                         style_img1,
@@ -495,28 +531,37 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         range=(-1, 1),
                     )
 
-                    # utils.save_image(
-                    #     style_img2,
-                    #     f"sample/{str(i).zfill(6)}_1.png",
-                    #     nrow=8,
-                    #     normalize=True,
-                    #     range=(-1, 1),
-                    # )
+                    utils.save_image(
+                        style_img2,
+                        f"sample/{str(i).zfill(6)}_1.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
 
-                    # utils.save_image(
-                    #     style_img3,
-                    #     f"sample/{str(i).zfill(6)}_2.png",
-                    #     nrow=8,
-                    #     normalize=True,
-                    #     range=(-1, 1),
-                    # )
+                    utils.save_image(
+                        style_img3,
+                        f"sample/{str(i).zfill(6)}_2.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+
+                    utils.save_image(
+                        mask,
+                        f"sample/{str(i).zfill(6)}_3.png",
+                        nrow=8,
+                        normalize=True,
+                        range=(0, 1),
+                    )
 
                     if wandb and args.wandb:
                         wandb.log(
                             {
                                 "style image1": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_0.png").convert("RGB"))],
-                                # "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
-                                # "mix style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "style image2": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_1.png").convert("RGB"))],
+                                "mix style image": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_2.png").convert("RGB"))],
+                                "mask": [wandb.Image(Image.open(f"sample/{str(i).zfill(6)}_3.png").convert("RGB"))],
                             }
                         )
 
@@ -617,6 +662,12 @@ if __name__ == "__main__":
         default=None,
         help="path to the checkpoints to resume training",
     )
+    parser.add_argument(
+        "--mk_ckpt",
+        type=str,
+        default=None,
+        help="path to the checkpoints to resume training",
+    )
     parser.add_argument("--lr", type=float, default=0.002,
                         help="learning rate")
     parser.add_argument(
@@ -703,12 +754,11 @@ if __name__ == "__main__":
         bilinear=True,
     ).to(device)
 
-    generator = Generator(
+    generator = SepGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        sep_mode=True,
     ).to(device)
 
     discriminator = Discriminator(
@@ -716,12 +766,11 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    g_ema = Generator(
+    g_ema = SepGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        sep_mode=True,
     ).to(device)
 
     g_ema.eval()
@@ -748,6 +797,11 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
+    if args.mk_ckpt is not None:
+        mk_ckpt = torch.load(args.mk_ckpt, map_location=lambda storage, loc: storage)
+        mknet.load_state_dict(mk_ckpt['mk'])
+        mk_optim.load_state_dict(mk_ckpt['mk_optim'])
+
     if args.ckpt is not None:
         print("load model:", args.ckpt)
 
@@ -757,11 +811,13 @@ if __name__ == "__main__":
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
-        mknet.load_state_dict(ckpt['mk'])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
-        mk_optim.load_state_dict(ckpt['mk_optim'])
+
+        if args.mk_ckpt is None:
+            mknet.load_state_dict(ckpt['mk'])
+            mk_optim.load_state_dict(ckpt['mk_optim'])
 
     if args.distributed:
 
