@@ -190,6 +190,7 @@ class ModulatedConv2d(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         fused=True,
         sep_mode=False,
+        is_skip=False,
     ):
         super().__init__()
 
@@ -201,6 +202,7 @@ class ModulatedConv2d(nn.Module):
         self.downsample = downsample
         self.sep_mode = sep_mode
         self.style_dim = style_dim
+        self.is_skip = is_skip
 
         if upsample:
             factor = 2
@@ -286,12 +288,21 @@ class ModulatedConv2d(nn.Module):
         if not self.sep_mode:
             _style = style
         else:
-            fgc = style[:,:,0:in_channel//2]
-            fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-            fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
-            bgc = style[:,:,in_channel//2:]
-            bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
-            _style = torch.cat([fgc, bgc], dim=1)
+            if not self.is_skip:
+                fgc = style[:,:,0:in_channel//2]
+                fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
+                fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
+                bgc = style[:,:,in_channel//2:]
+                bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
+                _style = torch.cat([fgc, bgc], dim=1)
+            else:
+                fgc = style[:,:,0:in_channel//2]
+                fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
+                fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
+                bgc = style[:,:,in_channel//2:]
+                bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
+                bgc = bgc.repeat(1,self.out_channel//2,1,1,1)
+                _style = torch.cat([fgc, bgc], dim=1)
 
         weight = self.scale * self.weight * _style
 
@@ -424,7 +435,7 @@ class ToRGB(nn.Module):
             self.upsample = Upsample(blur_kernel)
 
         self.conv = ModulatedConv2d(
-            in_channel, im_channel, 1, style_dim, demodulate=False, sep_mode=sep_mode)
+            in_channel, im_channel, 1, style_dim, demodulate=False, sep_mode=sep_mode, is_skip=True)
         self.bias = nn.Parameter(torch.zeros(1, im_channel, 1, 1))
 
     def forward(self, input, style, skip=None, input_is_ssc=False):
@@ -452,11 +463,13 @@ class Generator(nn.Module):
         sep_mode=False,
         negative_slope=0.2,
         starting_feature_size=4,
+        no_skip=False,
     ):
         super().__init__()
 
         self.size = size
         self.sep_mode = sep_mode
+        self.no_skip = no_skip
 
         self.style_dim = style_dim
 
@@ -710,6 +723,8 @@ class Generator(nn.Module):
                     out = input_feats[oix]
                     oix += 1
 
+                if self.no_skip:
+                    skip = None
                 skip, s = to_rgb(out, latent[:, i + 2], skip, input_is_ssc=input_is_ssc)
                 ssc.append(s)
                 skips.append(skip)
@@ -753,6 +768,8 @@ class Generator(nn.Module):
                     out = input_feats[oix]
                     oix += 1
 
+                if self.no_skip:
+                    skip = None
                 skip, _ = to_rgb(out, latent[i + 2], skip, input_is_ssc=input_is_ssc)
                 skips.append(skip)
 
@@ -2484,6 +2501,7 @@ class SepGenerator(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
         negative_slope=0.2,
+        no_skip=False,
         ):
         super().__init__()
 
@@ -2496,7 +2514,8 @@ class SepGenerator(nn.Module):
             blur_kernel=blur_kernel,
             lr_mlp=lr_mlp,
             sep_mode=True,
-            negative_slope=negative_slope
+            negative_slope=negative_slope,
+            no_skip=no_skip
         )
 
     def make_noise(self):
