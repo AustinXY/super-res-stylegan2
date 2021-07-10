@@ -335,11 +335,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         mk_loss.backward()
         mk_optim.step()
 
-        with torch.no_grad():
-            real_fg = real_img * fake_mask
-            real_bg = real_img - real_fg
-            real_img = torch.cat([real_fg, real_bg, real_img], dim=1)
-
         ############# train discriminator network #############
         requires_grad(generator, False)
         requires_grad(discriminator, True)
@@ -355,7 +350,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         else:
             real_img_aug = real_img
 
-        fake_pred = discriminator(fake_img)
+        fake_pred = discriminator(fake_img[2])
         real_pred = discriminator(real_img_aug)
         d_loss = d_logistic_loss(real_pred, fake_pred)
 
@@ -395,10 +390,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         ############# train generator network #############
         requires_grad(generator, True)
         requires_grad(discriminator, False)
+        requires_grad(mknet, False)
 
         fg_noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         bg_noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(fg_noise, bg_noise, inject_index=args.injidx)
+        imgs, _ = generator(fg_noise, bg_noise, inject_index=args.injidx)
+        fg_img, bg_img, fake_img = imgs
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -406,9 +403,16 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_pred = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
-        loss_dict["g"] = g_loss
+        mask = mknet(fake_img)
+        rmask = torch.ones_like(mask) - mask
 
-        loss = g_loss
+        sep_loss = F.mse_loss(mask * fg_img, fg_img)
+        sep_loss += F.mse_loss(rmask * bg_img, bg_img)
+
+        loss_dict["g"] = g_loss
+        loss_dict["sep"] = sep_loss
+
+        loss = g_loss + sep_loss * args.sep
 
         generator.zero_grad()
         loss.backward()
@@ -442,6 +446,43 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+
+        # ############# guide disentangle #############
+        requires_grad(generator, True)
+        requires_grad(mknet, False)
+
+        guide_regularize = i % args.guide_reg_every == 0
+        # guide_regularize = False
+        if guide_regularize:
+            noise1 = mixing_noise(args.batch//2, args.latent, args.mixing, device)
+            noise2 = mixing_noise(args.batch//2, args.latent, args.mixing, device)
+            noise3 = mixing_noise(args.batch//2, args.latent, args.mixing, device)
+
+            style_img1, _ = generator(noise1, noise2, inject_index=args.injidx)
+            style_img2, _ = generator(noise1, noise3, inject_index=args.injidx)
+
+            mask1 = mknet(style_img1[2])
+            rmask1 = torch.ones_like(mask1) - mask1
+
+            mask2 = mknet(style_img2[2])
+            rmask2 = torch.ones_like(mask2) - mask2
+
+            mut_rmask = rmask1 * rmask2
+
+            bg1 = mut_rmask * style_img1[1]
+            bg2 = mut_rmask * style_img2[1]
+
+            bg_loss = F.mse_loss(bg1, bg2)
+
+            loss_dict["bg"] = bg_loss
+
+            loss = bg_loss * args.bg
+
+            generator.zero_grad()
+            loss.backward()
+            g_optim.step()
+
+
         accumulate(g_ema, g_module, accum)
 
         loss_reduced = reduce_loss_dict(loss_dict)
@@ -453,6 +494,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
+        bg_loss_val = loss_reduced["bg"].mean().item()
+        sep_loss_val = loss_reduced["sep"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -473,6 +516,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
+                        "mutual bg": bg_loss_val,
+                        "separation loss": sep_loss_val,
                     }
                 )
 
@@ -484,9 +529,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     noise2 = mixing_noise(8, args.latent, args.mixing, device)
                     noise3 = mixing_noise(8, args.latent, args.mixing, device)
                     style_img1, _ = g_ema(noise1, noise2, inject_index=args.injidx)
-                    fg_img = style_img1[:, 0:3]
-                    bg_img = style_img1[:, 3:6]
-                    fnl_img = style_img1[:, 6:9]
+                    fg_img, bg_img, fnl_img = style_img1
 
                     # noise = mixing_noise(8, args.latent, args.mixing, device)
                     style_img2, _ = g_ema(noise1, noise3, inject_index=args.injidx)
@@ -523,7 +566,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        style_img2[:, 6:9],
+                        style_img2[2],
                         f"sample/{str(i).zfill(6)}_3.png",
                         nrow=8,
                         normalize=True,
@@ -531,7 +574,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        style_img3[:, 6:9],
+                        style_img3[2],
                         f"sample/{str(i).zfill(6)}_4.png",
                         nrow=8,
                         normalize=True,
@@ -647,6 +690,12 @@ if __name__ == "__main__":
         default=None,
         help="path to the checkpoints to resume training",
     )
+    parser.add_argument(
+        "--mk_ckpt",
+        type=str,
+        default=None,
+        help="path to the checkpoints to resume training",
+    )
     parser.add_argument("--lr", type=float, default=0.002,
                         help="learning rate")
     parser.add_argument(
@@ -700,8 +749,10 @@ if __name__ == "__main__":
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
     parser.add_argument("--neg", type=float, default=10, help="mse weight")
-    parser.add_argument("--mk", type=float, default=10, help="mse weight")
-    parser.add_argument("--sep", type=float, default=1000, help="mse weight")
+
+
+    parser.add_argument("--sep", type=float, default=10, help="mse weight")
+    parser.add_argument("--bg", type=float, default=10, help="mse weight")
 
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
@@ -743,7 +794,7 @@ if __name__ == "__main__":
 
     discriminator = Discriminator(
         size=args.size,
-        im_channel=9,
+        im_channel=3,
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
@@ -779,6 +830,11 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
+    if args.mk_ckpt is not None:
+        mk_ckpt = torch.load(args.mk_ckpt, map_location=lambda storage, loc: storage)
+        mknet.load_state_dict(mk_ckpt['mk'])
+        mk_optim.load_state_dict(mk_ckpt['mk_optim'])
+
     if args.ckpt is not None:
         print("load model:", args.ckpt)
 
@@ -788,11 +844,13 @@ if __name__ == "__main__":
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
-        mknet.load_state_dict(ckpt['mk'])
 
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
-        mk_optim.load_state_dict(ckpt['mk_optim'])
+
+        if args.mk_ckpt is None:
+            mknet.load_state_dict(ckpt['mk'])
+            mk_optim.load_state_dict(ckpt['mk_optim'])
 
     if args.distributed:
         segnet = nn.parallel.DistributedDataParallel(
