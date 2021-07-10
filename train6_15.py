@@ -341,6 +341,11 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             print("Done!")
             break
 
+        if args.mi <= 1e4:
+            args.mi = args.mi * 10 ** (i // args.adjust_mi_steps)
+        if args.sep <= 1e3:
+            args.sep = args.sep * 10 ** (i // args.adjust_sep_steps)
+
         real_img = next(loader)
         real_img = real_img.to(device)
 
@@ -791,11 +796,11 @@ if __name__ == "__main__":
     parser.add_argument("--dis1", type=float, default=0.2, help="mse weight")
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
-    parser.add_argument("--neg", type=float, default=10, help="mse weight")
-
 
     parser.add_argument("--mi", type=float, default=10, help="mse weight")
-    parser.add_argument("--sep", type=float, default=100, help="mse weight")
+    parser.add_argument("--sep", type=float, default=10, help="mse weight")
+    parser.add_argument("--adjust_mi_steps", type=int, default=50000, help="Threshold for mask")
+    parser.add_argument("--adjust_sep_steps", type=int, default=50000, help="Threshold for mask")
 
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
