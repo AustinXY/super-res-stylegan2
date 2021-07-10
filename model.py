@@ -347,7 +347,7 @@ class ModulatedConv2d(nn.Module):
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
 
-        return out, style
+        return out, style.view(batch, in_channel)
 
 
 class NoiseInjection(nn.Module):

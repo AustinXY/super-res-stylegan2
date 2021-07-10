@@ -125,6 +125,18 @@ def mixing_noise(batch, latent_dim, prob, device):
         return make_noise(batch, latent_dim, 1, device)
 
 
+def sample_n_noise(batch, latent_dim, prob, device, n=3):
+    k = 1
+    if prob > 0 and random.random() < prob:
+        k = 2
+
+    l = []
+    for i in range(n):
+        l.append(make_noise(batch, latent_dim, k, device))
+
+    return l
+
+
 def set_grad_none(model, targets):
     for n, p in model.named_parameters():
         if n in targets:
@@ -235,7 +247,8 @@ def approx_bin_mask(img, mknet, thrsh0=0.8, thrsh1=0.3, pad_px=3):
     mask = process_mask(mask, thrsh0, thrsh1, pad_px)
     return mask
 
-def get_mask(model, img, unnorm=False):
+
+def get_seg_mask(model, img, unnorm=False):
     if unnorm:
         img = un_normalize(img)
     normalized_batch = transforms.functional.normalize(img, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
@@ -252,6 +265,18 @@ def get_mask(model, img, unnorm=False):
     bool_mk = (normalized_masks.argmax(1) == 7)
     return bool_mk.float().unsqueeze(1)
 
+
+def get_mask(mknet, segnet, img):
+    mask_ = get_seg_mask(segnet, img, unnorm=True)
+    mask__ = mknet(img)
+
+    mask = mask_.clone()
+    min_size = mask.size(-1) * mask.size(-2) * 0.1
+    for b in range(img.size(0)):
+        if torch.sum(mask[b]) <= min_size:
+            mask[b] = mask__[b]
+
+    return mask
 
 def norm_ip(img, low, high):
     img_ = img.clamp(min=low, max=high)
@@ -323,7 +348,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         mknet.train()
         requires_grad(mknet, True)
 
-        real_mask = get_mask(segnet, real_img, unnorm=True)
+        real_mask = get_seg_mask(segnet, real_img, unnorm=True)
         fake_mask = mknet(real_img)
 
         mk_loss = F.mse_loss(fake_mask, real_mask)
@@ -339,7 +364,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, True)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(noise, inject_index=args.injidx)
+        fake_img, _ = generator(noise)
 
         if args.augment:
             real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -390,7 +415,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(noise, inject_index=args.injidx)
+        fake_img, _ = generator(noise)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -411,7 +436,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # if g_regularize:
         #     path_batch_size = max(1, args.batch // args.path_batch_shrink)
         #     noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
-        #     fake_img, latents = generator(noise, return_latents=True, inject_index=args.injidx)
+        #     fake_img, latents = generator(noise, return_latents=True)
 
         #     path_loss, mean_path_length, path_lengths = g_path_regularize(
         #         fake_img, latents, mean_path_length
@@ -434,7 +459,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-        # ############# guide disentangle #############
+        ############# guide disentangle #############
         requires_grad(generator, True)
         requires_grad(mknet, False)
 
@@ -442,18 +467,16 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # guide_regularize = False
         if guide_regularize:
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            imgs, _ = generator(noise, inject_index=args.injidx, return_separately=True)
+            imgs, _ = generator(noise, return_separately=True)
 
             fg_img, bg_img, style_img = imgs
 
-            _mask = mknet(style_img)
-            # sep_loss = torch.tensor(0.0, device=device)
+            mask = get_mask(mknet, segnet, style_img)
 
-            # _mask = F.interpolate(mask, size=(f.size(-2), f.size(-1)), mode='area')
-            _rmask = torch.ones_like(_mask) - _mask
+            rmask = torch.ones_like(mask) - mask
 
-            sep_loss = F.mse_loss(fg_img*_mask, fg_img)
-            sep_loss += F.mse_loss(bg_img*_rmask, bg_img)
+            sep_loss = F.mse_loss(fg_img*mask, fg_img)
+            sep_loss += F.mse_loss(bg_img*rmask, bg_img)
 
             loss_dict["sep"] = sep_loss
 
@@ -462,6 +485,41 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             generator.zero_grad()
             loss.backward()
             g_optim.step()
+
+
+        ############# guide mutual invarient #############
+        requires_grad(generator, True)
+        requires_grad(mknet, False)
+
+        guide_regularize = i % args.guide_reg_every == 0
+        # guide_regularize = False
+        if guide_regularize:
+            noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
+
+            imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True)
+            _, bg_img1, style_img1 = imgs1
+            imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True)
+            _, bg_img2, style_img2 = imgs2
+
+            mask1 = get_mask(mknet, segnet, style_img1)
+            mask2 = get_mask(mknet, segnet, style_img2)
+            rmask1 = torch.ones_like(mask1) - mask1
+            rmask2 = torch.ones_like(mask2) - mask2
+            mut_rmask = rmask1 * rmask2
+
+            bg1 = mut_rmask * bg_img1
+            bg2 = mut_rmask * bg_img2
+
+            bg_loss = F.mse_loss(bg1, bg2)
+
+            loss = bg_loss * args.mi
+
+            loss_dict["mi"] = bg_loss
+
+            generator.zero_grad()
+            loss.backward()
+            g_optim.step()
+
 
         accumulate(g_ema, g_module, accum)
 
@@ -475,7 +533,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         sep_loss_val = loss_reduced["sep"].mean().item()
-        # fgf_loss_val = loss_reduced["fg_f"].mean().item()
+        mi_loss_val = loss_reduced["mi"].mean().item()
         # bgf_loss_val = loss_reduced["bg_f"].mean().item()
 
         if get_rank() == 0:
@@ -498,7 +556,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "Separation loss": sep_loss_val,
-                        # "fg feature sum": fgf_loss_val,
+                        "mutual feature invariant": mi_loss_val,
                         # "bg feature sum": bgf_loss_val,
                     }
                 )
@@ -510,20 +568,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
                     img_noise = g_module.make_noise()
 
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    imgs1, ssc1 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True, return_separately=True)
+                    noise1, noise2, noise3 = sample_n_noise(8, args.latent//2, args.mixing, device, n=3)
+                    imgs1, _ = g_ema(torch.cat([noise1, noise2], dim=2), return_separately=True, noise=img_noise)
                     fg_img1, bg_img1, style_img1 = imgs1
-                    mask = mknet(style_img1)
-
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, ssc2 = g_ema(noise, inject_index=args.injidx, noise=img_noise, return_ssc=True)
-
-                    ssc3 = copy.deepcopy(ssc1)
-                    for l in range(len(ssc3)):
-                        channel = ssc3[l].size(1)
-                        ssc3[l][:, channel//2:] = ssc2[l][:, channel//2:]
-
-                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, inject_index=args.injidx, noise=img_noise)
+                    mask1 = get_mask(mknet, segnet, style_img1)
+                    style_img2, _ = g_ema(torch.cat([noise2, noise3], dim=2), noise=img_noise)
+                    style_img3, _ = g_ema(torch.cat([noise1, noise3], dim=2), noise=img_noise)
 
                     utils.save_image(
                         style_img1,
@@ -550,7 +600,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     )
 
                     utils.save_image(
-                        mask,
+                        mask1,
                         f"sample/{str(i).zfill(6)}_3.png",
                         nrow=8,
                         normalize=True,
@@ -742,8 +792,10 @@ if __name__ == "__main__":
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
     parser.add_argument("--neg", type=float, default=10, help="mse weight")
-    parser.add_argument("--mk", type=float, default=10, help="mse weight")
-    parser.add_argument("--sep", type=float, default=10, help="mse weight")
+
+
+    parser.add_argument("--mi", type=float, default=10, help="mse weight")
+    parser.add_argument("--sep", type=float, default=100, help="mse weight")
 
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
@@ -780,7 +832,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        no_skip=True,
+        no_skip=False,
     ).to(device)
 
     discriminator = Discriminator(
@@ -793,7 +845,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        no_skip=True,
+        no_skip=False,
     ).to(device)
 
     g_ema.eval()
