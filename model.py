@@ -2487,8 +2487,7 @@ class TwoStageGenerator(nn.Module):
         )
 
         fnl_img = fg_img + bg_img
-        img = torch.cat([fg_img, bg_img, fnl_img], dim=1)
-        return img, (fg_out, bg_out)
+        return (fg_img, bg_img, fnl_img), (fg_out, bg_out)
 
 
 class SepGenerator(nn.Module):
