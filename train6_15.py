@@ -492,38 +492,38 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             g_optim.step()
 
 
-        ############# guide mutual invarient #############
-        requires_grad(generator, True)
-        requires_grad(mknet, False)
+        # ############# guide mutual invarient #############
+        # requires_grad(generator, True)
+        # requires_grad(mknet, False)
 
-        guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
-        if guide_regularize:
-            noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
+        # guide_regularize = i % args.guide_reg_every == 0
+        # # guide_regularize = False
+        # if guide_regularize:
+        #     noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
 
-            imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True)
-            _, bg_img1, style_img1 = imgs1
-            imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True)
-            _, bg_img2, style_img2 = imgs2
+        #     imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True)
+        #     _, bg_img1, style_img1 = imgs1
+        #     imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True)
+        #     _, bg_img2, style_img2 = imgs2
 
-            mask1 = get_mask(mknet, segnet, style_img1)
-            mask2 = get_mask(mknet, segnet, style_img2)
-            rmask1 = torch.ones_like(mask1) - mask1
-            rmask2 = torch.ones_like(mask2) - mask2
-            mut_rmask = rmask1 * rmask2
+        #     mask1 = get_mask(mknet, segnet, style_img1)
+        #     mask2 = get_mask(mknet, segnet, style_img2)
+        #     rmask1 = torch.ones_like(mask1) - mask1
+        #     rmask2 = torch.ones_like(mask2) - mask2
+        #     mut_rmask = rmask1 * rmask2
 
-            bg1 = mut_rmask * bg_img1
-            bg2 = mut_rmask * bg_img2
+        #     bg1 = mut_rmask * bg_img1
+        #     bg2 = mut_rmask * bg_img2
 
-            bg_loss = F.mse_loss(bg1, bg2)
+        #     bg_loss = F.mse_loss(bg1, bg2)
 
-            loss = bg_loss * args.mi
+        #     loss = bg_loss * args.mi
 
-            loss_dict["mi"] = bg_loss
+        #     loss_dict["mi"] = bg_loss
 
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
+        #     generator.zero_grad()
+        #     loss.backward()
+        #     g_optim.step()
 
 
         accumulate(g_ema, g_module, accum)
@@ -538,7 +538,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         sep_loss_val = loss_reduced["sep"].mean().item()
-        mi_loss_val = loss_reduced["mi"].mean().item()
+        # mi_loss_val = loss_reduced["mi"].mean().item()
         # bgf_loss_val = loss_reduced["bg_f"].mean().item()
 
         if get_rank() == 0:
@@ -561,7 +561,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "Separation loss": sep_loss_val,
-                        "mutual feature invariant": mi_loss_val,
+                        # "mutual feature invariant": mi_loss_val,
                         # "bg feature sum": bgf_loss_val,
                     }
                 )

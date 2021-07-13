@@ -567,8 +567,10 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "g": g_module.state_dict(),
                         "d": d_module.state_dict(),
                         "g_ema": g_ema.state_dict(),
+                        "mk": mk_module.state_dict(),
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
+                        "mk_optim": mk_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
