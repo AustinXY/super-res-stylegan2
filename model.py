@@ -190,6 +190,8 @@ class ModulatedConv2d(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         fused=True,
         sep_mode=False,
+        fgc_0out=False,
+        bgc_0out=False,
         is_skip=False,
     ):
         super().__init__()
@@ -203,6 +205,8 @@ class ModulatedConv2d(nn.Module):
         self.sep_mode = sep_mode
         self.style_dim = style_dim
         self.is_skip = is_skip
+        self.fgc_0out = fgc_0out
+        self.bgc_0out = bgc_0out
 
         if upsample:
             factor = 2
@@ -288,27 +292,36 @@ class ModulatedConv2d(nn.Module):
         if not self.sep_mode:
             _style = style
         else:
-            # if not self.is_skip:
-            #     fgc = style[:,:,0:in_channel//2]
-            #     fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-            #     fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
-            #     bgc = style[:,:,in_channel//2:]
-            #     bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
-            #     _style = torch.cat([fgc, bgc], dim=1)
-            # else:
-            if self.out_channel % 2 == 0:
-                oc1 = self.out_channel // 2
-            else:
-                oc1 = (self.out_channel + 1) // 2
-            oc2 = self.out_channel - oc1
+            if not self.is_skip:
+                fgc = style[:,:,0:in_channel//2]
+                if self.fgc_0out:
+                    fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
+                else:
+                    fgc = torch.cat([fgc, fgc], dim=2)
+                fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
 
-            fgc = style[:,:,0:in_channel//2]
-            fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-            fgc = fgc.repeat(1,oc1,1,1,1)
-            bgc = style[:,:,in_channel//2:]
-            bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
-            bgc = bgc.repeat(1,oc2,1,1,1)
-            _style = torch.cat([fgc, bgc], dim=1)
+                bgc = style[:,:,in_channel//2:]
+                if self.bgc_0out:
+                    bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
+                else:
+                    bgc = torch.cat([bgc, bgc], dim=2)
+                bgc = bgc.repeat(1,self.out_channel//2,1,1,1)
+
+                _style = torch.cat([fgc, bgc], dim=1)
+            else:
+                if self.out_channel % 2 == 0:
+                    oc1 = self.out_channel // 2
+                else:
+                    oc1 = (self.out_channel + 1) // 2
+                oc2 = self.out_channel - oc1
+
+                fgc = style[:,:,0:in_channel//2]
+                fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
+                fgc = fgc.repeat(1,oc1,1,1,1)
+                bgc = style[:,:,in_channel//2:]
+                bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
+                bgc = bgc.repeat(1,oc2,1,1,1)
+                _style = torch.cat([fgc, bgc], dim=1)
 
         weight = self.scale * self.weight * _style
 
@@ -405,6 +418,8 @@ class StyledConv(nn.Module):
         demodulate=True,
         sep_mode=False,
         negative_slope=0.2,
+        fgc_0out=False,
+        bgc_0out=False,
     ):
         super().__init__()
 
@@ -417,6 +432,8 @@ class StyledConv(nn.Module):
             blur_kernel=blur_kernel,
             demodulate=demodulate,
             sep_mode=sep_mode,
+            fgc_0out=fgc_0out,
+            bgc_0out=bgc_0out,
         )
 
         self.noise = NoiseInjection()
@@ -470,6 +487,8 @@ class Generator(nn.Module):
         negative_slope=0.2,
         starting_feature_size=4,
         no_skip=False,
+        fgc_0out=False,
+        bgc_0out=False,
     ):
         super().__init__()
 
@@ -527,7 +546,15 @@ class Generator(nn.Module):
         starting_n_channel = self.channels[starting_feature_size]
         self.input = ConstantInput(starting_n_channel)
         self.conv1 = StyledConv(
-            starting_n_channel, starting_n_channel, 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode, negative_slope=negative_slope
+            starting_n_channel,
+            starting_n_channel,
+            3,
+            style_dim,
+            blur_kernel=blur_kernel,
+            sep_mode=sep_mode,
+            negative_slope=negative_slope,
+            fgc_0out=fgc_0out,
+            bgc_0out=bgc_0out,
         )
         self.to_rgb1 = ToRGB(starting_n_channel, style_dim, im_channel=im_channel, upsample=False, sep_mode=sep_mode)
 
@@ -560,12 +587,22 @@ class Generator(nn.Module):
                     blur_kernel=blur_kernel,
                     sep_mode=sep_mode,
                     negative_slope=negative_slope,
+                    fgc_0out=fgc_0out,
+                    bgc_0out=bgc_0out,
                 )
             )
 
             self.convs.append(
                 StyledConv(
-                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel, sep_mode=sep_mode, negative_slope=negative_slope
+                    out_channel,
+                    out_channel,
+                    3,
+                    style_dim,
+                    blur_kernel=blur_kernel,
+                    sep_mode=sep_mode,
+                    negative_slope=negative_slope,
+                    fgc_0out=fgc_0out,
+                    bgc_0out=bgc_0out,
                 )
             )
 
@@ -2555,6 +2592,7 @@ class SepGenerator(nn.Module):
             return_feats=return_feats,
             return_ssc=return_ssc,
             noise=noise,
+            inject_index=inject_index
             )
 
         fg_img = img[:, 0:3]
@@ -2578,6 +2616,8 @@ class SepWithMkGenerator(nn.Module):
         lr_mlp=0.01,
         negative_slope=0.2,
         no_skip=False,
+        fgc_0out=False,
+        bgc_0out=False,
         ):
         super().__init__()
 
@@ -2591,7 +2631,9 @@ class SepWithMkGenerator(nn.Module):
             lr_mlp=lr_mlp,
             sep_mode=True,
             negative_slope=negative_slope,
-            no_skip=no_skip
+            no_skip=no_skip,
+            fgc_0out=fgc_0out,
+            bgc_0out=bgc_0out,
         )
 
     def make_noise(self):
@@ -2626,6 +2668,7 @@ class SepWithMkGenerator(nn.Module):
             return_feats=return_feats,
             return_ssc=return_ssc,
             noise=noise,
+            inject_index=inject_index
             )
 
         fg_img = imgs[:, 0:3]
