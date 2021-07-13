@@ -296,12 +296,18 @@ class ModulatedConv2d(nn.Module):
                 bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
                 _style = torch.cat([fgc, bgc], dim=1)
             else:
+                if self.out_channel % 2 == 0:
+                    oc1 = self.out_channel // 2
+                else:
+                    oc1 = (self.out_channel + 1) // 2
+                oc2 = self.out_channel - oc1
+
                 fgc = style[:,:,0:in_channel//2]
                 fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-                fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
+                fgc = fgc.repeat(1,oc1,1,1,1)
                 bgc = style[:,:,in_channel//2:]
                 bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
-                bgc = bgc.repeat(1,self.out_channel//2,1,1,1)
+                bgc = bgc.repeat(1,oc2,1,1,1)
                 _style = torch.cat([fgc, bgc], dim=1)
 
         weight = self.scale * self.weight * _style
@@ -2559,3 +2565,78 @@ class SepGenerator(nn.Module):
             return fnl_img, out
 
         return [fg_img, bg_img, fnl_img], out
+
+
+class SepWithMkGenerator(nn.Module):
+    def __init__(
+        self,
+        size,
+        style_dim,
+        n_mlp,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        lr_mlp=0.01,
+        negative_slope=0.2,
+        no_skip=False,
+        ):
+        super().__init__()
+
+        self.generator = Generator(
+            size=size,
+            style_dim=style_dim,
+            n_mlp=n_mlp,
+            im_channel=7,
+            channel_multiplier=channel_multiplier,
+            blur_kernel=blur_kernel,
+            lr_mlp=lr_mlp,
+            sep_mode=True,
+            negative_slope=negative_slope,
+            no_skip=no_skip
+        )
+
+    def make_noise(self):
+        return self.generator.make_noise()
+
+    def forward(
+        self,
+        styles,
+        input_feats=[],
+        return_latents=False,
+        inject_index=None,
+        truncation=1,
+        truncation_latent=None,
+        input_is_latent=False,
+        noise=None,
+        randomize_noise=True,
+        input_is_ssc=False,
+        return_ssc=False,
+        return_img_only=False,
+        return_feats=False,
+        return_feats_only=False,
+        return_skips_n_feats=False,
+        return_skips=False,
+        return_ssc_only=False,
+        return_separately=False
+        ):
+
+        imgs, out = self.generator(
+            styles,
+            input_is_ssc=input_is_ssc,
+            return_latents=return_latents,
+            return_feats=return_feats,
+            return_ssc=return_ssc,
+            noise=noise,
+            )
+
+        fg_img = imgs[:, 0:3]
+        mask = imgs[:, 3:4]
+        bg_img = imgs[:, 4:7]
+
+        mask = torch.sigmoid(mask)
+        rmask = torch.ones_like(mask) - mask
+
+        fnl_img = fg_img * mask + bg_img * rmask
+        if not return_separately:
+            return fnl_img, out
+
+        return [fg_img, bg_img, fnl_img, mask], out

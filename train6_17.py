@@ -31,7 +31,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import SepGenerator, Discriminator, UNet
+from model import SepWithMkGenerator, Discriminator, UNet
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -215,6 +215,7 @@ def rand_sample_codes(prev_z=None, prev_b=None, prev_p=None, prev_c=None, rand_c
 
     return z, b, p, c
 
+
 def binarization_loss(mask):
     return torch.min(1-mask, mask).mean()
 
@@ -341,28 +342,23 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             print("Done!")
             break
 
-        # if args.mi <= 1e4:
-        #     args.mi = args.mi * 10 ** (i // args.adjust_mi_steps)
-        # if args.sep <= 1e3:
-        #     args.sep = args.sep * 10 ** (i // args.adjust_sep_steps)
-
         real_img = next(loader)
         real_img = real_img.to(device)
 
-        ############# train mask network #############
-        mknet.train()
-        requires_grad(mknet, True)
+        # ############# train mask network #############
+        # mknet.train()
+        # requires_grad(mknet, True)
 
-        real_mask = get_seg_mask(segnet, real_img, unnorm=True)
-        fake_mask = mknet(real_img)
+        # real_mask = get_seg_mask(segnet, real_img, unnorm=True)
+        # fake_mask = mknet(real_img)
 
-        mk_loss = F.mse_loss(fake_mask, real_mask)
+        # mk_loss = F.mse_loss(fake_mask, real_mask)
 
-        loss_dict["mk"] = mk_loss
+        # loss_dict["mk"] = mk_loss
 
-        mknet.zero_grad()
-        mk_loss.backward()
-        mk_optim.step()
+        # mknet.zero_grad()
+        # mk_loss.backward()
+        # mk_optim.step()
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -420,7 +416,11 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        fake_img, _ = generator(noise)
+        imgs, _ = generator(noise, return_separately=True)
+        fake_img = imgs[2]
+        mask = imgs[3]
+        rmask = torch.ones_like(mask) - mask
+        full_size = mask.size(-1) * mask.size(-2)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -428,9 +428,17 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_pred = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
-        loss_dict["g"] = g_loss
+        bin_loss = binarization_loss(mask)
 
-        loss = g_loss
+        min_size = full_size * args.min_ratio
+        cvg_loss = F.relu(min_size - torch.mean(torch.sum(mask, dim=(-1,-2))))
+        cvg_loss += F.relu(min_size - torch.mean(torch.sum(rmask, dim=(-1,-2))))
+
+        loss = g_loss + bin_loss * args.bin + cvg_loss * args.cvg
+
+        loss_dict["g"] = g_loss
+        loss_dict["bin"] = bin_loss
+        loss_dict["cvg"] = cvg_loss
 
         generator.zero_grad()
         loss.backward()
@@ -464,32 +472,32 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-        ############# guide disentangle #############
-        requires_grad(generator, True)
-        requires_grad(mknet, False)
+        # ############# guide disentangle #############
+        # requires_grad(generator, True)
+        # requires_grad(mknet, False)
 
-        guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
-        if guide_regularize:
-            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            imgs, _ = generator(noise, return_separately=True)
+        # guide_regularize = i % args.guide_reg_every == 0
+        # # guide_regularize = False
+        # if guide_regularize:
+        #     noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        #     imgs, _ = generator(noise, return_separately=True)
 
-            fg_img, bg_img, style_img = imgs
+        #     fg_img, bg_img, style_img = imgs
 
-            mask = get_mask(mknet, segnet, style_img)
+        #     mask = get_mask(mknet, segnet, style_img)
 
-            rmask = torch.ones_like(mask) - mask
+        #     rmask = torch.ones_like(mask) - mask
 
-            sep_loss = F.mse_loss(fg_img*mask, fg_img)
-            sep_loss += F.mse_loss(bg_img*rmask, bg_img)
+        #     sep_loss = F.mse_loss(fg_img*mask, fg_img)
+        #     sep_loss += F.mse_loss(bg_img*rmask, bg_img)
 
-            loss_dict["sep"] = sep_loss
+        #     loss_dict["sep"] = sep_loss
 
-            loss = sep_loss * args.sep
+        #     loss = sep_loss * args.sep
 
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
+        #     generator.zero_grad()
+        #     loss.backward()
+        #     g_optim.step()
 
 
         ############# guide mutual invarient #############
@@ -502,12 +510,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
 
             imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True)
-            _, bg_img1, style_img1 = imgs1
+            _, bg_img1, _, mask1 = imgs1
             imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True)
-            _, bg_img2, style_img2 = imgs2
+            _, bg_img2, _, mask2 = imgs2
 
-            mask1 = get_mask(mknet, segnet, style_img1)
-            mask2 = get_mask(mknet, segnet, style_img2)
+            # mask1 = get_mask(mknet, segnet, style_img1)
+            # mask2 = get_mask(mknet, segnet, style_img2)
             rmask1 = torch.ones_like(mask1) - mask1
             rmask2 = torch.ones_like(mask2) - mask2
             mut_rmask = rmask1 * rmask2
@@ -537,9 +545,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
-        sep_loss_val = loss_reduced["sep"].mean().item()
+        bin_loss_val = loss_reduced["bin"].mean().item()
+        cvg_loss_val = loss_reduced["cvg"].mean().item()
         mi_loss_val = loss_reduced["mi"].mean().item()
-        # bgf_loss_val = loss_reduced["bg_f"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -560,9 +568,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
-                        "Separation loss": sep_loss_val,
-                        "mutual feature invariant": mi_loss_val,
-                        # "bg feature sum": bgf_loss_val,
+                        "binary loss": bin_loss_val,
+                        "minimum coverage loss": cvg_loss_val,
+                        "mutual invariant loss": mi_loss_val,
                     }
                 )
 
@@ -575,8 +583,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
                     noise1, noise2, noise3 = sample_n_noise(8, args.latent//2, args.mixing, device, n=3)
                     imgs1, _ = g_ema(torch.cat([noise1, noise2], dim=2), return_separately=True, noise=img_noise)
-                    fg_img1, bg_img1, style_img1 = imgs1
-                    mask1 = get_mask(mknet, segnet, style_img1)
+                    fg_img1, bg_img1, style_img1, mask1 = imgs1
                     style_img2, _ = g_ema(torch.cat([noise2, noise3], dim=2), noise=img_noise)
                     style_img3, _ = g_ema(torch.cat([noise1, noise3], dim=2), noise=img_noise)
 
@@ -653,7 +660,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_15.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_17.pt",
                 )
 
 
@@ -797,10 +804,11 @@ if __name__ == "__main__":
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
 
-    parser.add_argument("--mi", type=float, default=1, help="mse weight")
-    parser.add_argument("--sep", type=float, default=10, help="mse weight")
-    parser.add_argument("--adjust_mi_steps", type=int, default=50000, help="Threshold for mask")
-    parser.add_argument("--adjust_sep_steps", type=int, default=50000, help="Threshold for mask")
+    parser.add_argument("--bin", type=float, default=10, help="mse weight")
+    parser.add_argument("--cvg", type=float, default=1, help="mse weight")
+    parser.add_argument("--mi", type=float, default=10, help="mse weight")
+
+    parser.add_argument("--min_ratio", type=float, default=0.2, help="Threshold for mask")
 
 
     parser.add_argument("--mk_thrsh0", type=float, default=0.5, help="Threshold for mask")
@@ -832,7 +840,7 @@ if __name__ == "__main__":
         bilinear=True,
     ).to(device)
 
-    generator = SepGenerator(
+    generator = SepWithMkGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -845,7 +853,7 @@ if __name__ == "__main__":
         channel_multiplier=args.channel_multiplier
     ).to(device)
 
-    g_ema = SepGenerator(
+    g_ema = SepWithMkGenerator(
         size=args.size,
         style_dim=args.latent,
         n_mlp=args.n_mlp,
@@ -952,7 +960,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_15")
+        wandb.init(project="guide 6_17")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim)
