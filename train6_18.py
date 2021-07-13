@@ -574,12 +574,13 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     mknet.eval()
 
                     img_noise = g_module.make_noise()
+                    ijid = random.randint(1, g_ema.n_latent - 1)
 
                     noise1, noise2, noise3 = sample_n_noise(8, args.latent//2, args.mixing, device, n=3)
-                    imgs1, _ = g_ema(torch.cat([noise1, noise2], dim=2), return_separately=True, noise=img_noise)
+                    imgs1, _ = g_ema(torch.cat([noise1, noise2], dim=2), return_separately=True, noise=img_noise, inject_index=ijid)
                     fg_img1, bg_img1, style_img1, mask1 = imgs1
-                    style_img2, _ = g_ema(torch.cat([noise2, noise3], dim=2), noise=img_noise)
-                    style_img3, _ = g_ema(torch.cat([noise1, noise3], dim=2), noise=img_noise)
+                    style_img2, _ = g_ema(torch.cat([noise2, noise3], dim=2), noise=img_noise, inject_index=ijid)
+                    style_img3, _ = g_ema(torch.cat([noise1, noise3], dim=2), noise=img_noise, inject_index=ijid)
 
                     utils.save_image(
                         style_img1,
@@ -839,9 +840,9 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        no_skip=False,
+        # no_skip=False,
         fgc_0out=True,
-        bgc_0out=False,
+        bgc_0out=True,
     ).to(device)
 
     discriminator = Discriminator(
@@ -854,9 +855,9 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        no_skip=False,
+        # no_skip=False,
         fgc_0out=True,
-        bgc_0out=False,
+        bgc_0out=True,
     ).to(device)
 
     g_ema.eval()
