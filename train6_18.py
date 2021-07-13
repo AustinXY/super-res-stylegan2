@@ -436,10 +436,10 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         cvg_loss = F.relu(min_size - torch.mean(torch.sum(fake_mask, dim=(-1,-2))))
         cvg_loss += F.relu(min_size - torch.mean(torch.sum(rmask, dim=(-1,-2))))
 
-        real_mask = get_mask(fake_img)
-        mk_loss = F.mse_loss(fake_mask, real_mask)
+        real_mask = get_mask(mknet, segnet, fake_img)
+        gmk_loss = F.mse_loss(fake_mask, real_mask)
 
-        loss = g_loss + bin_loss * args.bin + cvg_loss * args.cvg + mk_loss * args.mk
+        loss = g_loss + bin_loss * args.bin + cvg_loss * args.cvg + gmk_loss * args.gmk
 
         loss_dict["g"] = g_loss
         loss_dict["bin"] = bin_loss
@@ -806,7 +806,7 @@ if __name__ == "__main__":
     parser.add_argument("--dis1", type=float, default=0.2, help="mse weight")
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
-
+    parser.add_argument("--gmk", type=float, default=10, help="mse weight")
     parser.add_argument("--bin", type=float, default=10, help="mse weight")
     parser.add_argument("--cvg", type=float, default=1, help="mse weight")
     parser.add_argument("--mi", type=float, default=10, help="mse weight")
