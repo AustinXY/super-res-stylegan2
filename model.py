@@ -288,27 +288,27 @@ class ModulatedConv2d(nn.Module):
         if not self.sep_mode:
             _style = style
         else:
-            if not self.is_skip:
-                fgc = style[:,:,0:in_channel//2]
-                fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-                fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
-                bgc = style[:,:,in_channel//2:]
-                bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
-                _style = torch.cat([fgc, bgc], dim=1)
+            # if not self.is_skip:
+            #     fgc = style[:,:,0:in_channel//2]
+            #     fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
+            #     fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
+            #     bgc = style[:,:,in_channel//2:]
+            #     bgc = bgc.repeat(1,self.out_channel//2,2,1,1)
+            #     _style = torch.cat([fgc, bgc], dim=1)
+            # else:
+            if self.out_channel % 2 == 0:
+                oc1 = self.out_channel // 2
             else:
-                if self.out_channel % 2 == 0:
-                    oc1 = self.out_channel // 2
-                else:
-                    oc1 = (self.out_channel + 1) // 2
-                oc2 = self.out_channel - oc1
+                oc1 = (self.out_channel + 1) // 2
+            oc2 = self.out_channel - oc1
 
-                fgc = style[:,:,0:in_channel//2]
-                fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-                fgc = fgc.repeat(1,oc1,1,1,1)
-                bgc = style[:,:,in_channel//2:]
-                bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
-                bgc = bgc.repeat(1,oc2,1,1,1)
-                _style = torch.cat([fgc, bgc], dim=1)
+            fgc = style[:,:,0:in_channel//2]
+            fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
+            fgc = fgc.repeat(1,oc1,1,1,1)
+            bgc = style[:,:,in_channel//2:]
+            bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
+            bgc = bgc.repeat(1,oc2,1,1,1)
+            _style = torch.cat([fgc, bgc], dim=1)
 
         weight = self.scale * self.weight * _style
 
