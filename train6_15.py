@@ -798,7 +798,7 @@ if __name__ == "__main__":
 
 
     parser.add_argument("--mi", type=float, default=1, help="mse weight")
-    parser.add_argument("--sep", type=float, default=10, help="mse weight")
+    parser.add_argument("--sep", type=float, default=100, help="mse weight")
     parser.add_argument("--adjust_mi_steps", type=int, default=50000, help="Threshold for mask")
     parser.add_argument("--adjust_sep_steps", type=int, default=50000, help="Threshold for mask")
 
