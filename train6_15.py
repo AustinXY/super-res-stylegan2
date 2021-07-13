@@ -1,4 +1,4 @@
-# using sep mode
+# using sep mode with supervision
 
 import argparse
 import math
