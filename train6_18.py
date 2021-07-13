@@ -345,20 +345,20 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_img = next(loader)
         real_img = real_img.to(device)
 
-        # ############# train mask network #############
-        # mknet.train()
-        # requires_grad(mknet, True)
+        ############# train mask network #############
+        mknet.train()
+        requires_grad(mknet, True)
 
-        # real_mask = get_seg_mask(segnet, real_img, unnorm=True)
-        # fake_mask = mknet(real_img)
+        real_mask = get_seg_mask(segnet, real_img, unnorm=True)
+        fake_mask = mknet(real_img)
 
-        # mk_loss = F.mse_loss(fake_mask, real_mask)
+        mk_loss = F.mse_loss(fake_mask, real_mask)
 
-        # loss_dict["mk"] = mk_loss
+        loss_dict["mk"] = mk_loss
 
-        # mknet.zero_grad()
-        # mk_loss.backward()
-        # mk_optim.step()
+        mknet.zero_grad()
+        mk_loss.backward()
+        mk_optim.step()
 
         ############# train discriminator network #############
         requires_grad(generator, False)
@@ -414,13 +414,15 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         ############# train generator network #############
         requires_grad(generator, True)
         requires_grad(discriminator, False)
+        requires_grad(mknet, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         imgs, _ = generator(noise, return_separately=True)
-        fake_img = imgs[2]
-        mask = imgs[3]
-        rmask = torch.ones_like(mask) - mask
-        full_size = mask.size(-1) * mask.size(-2)
+
+        _, _, fake_img, fake_mask = imgs
+
+        rmask = torch.ones_like(fake_mask) - fake_mask
+        full_size = fake_mask.size(-1) * fake_mask.size(-2)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
@@ -428,13 +430,16 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_pred = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
-        bin_loss = binarization_loss(mask)
+        bin_loss = binarization_loss(fake_mask)
 
         min_size = full_size * args.min_ratio
-        cvg_loss = F.relu(min_size - torch.mean(torch.sum(mask, dim=(-1,-2))))
+        cvg_loss = F.relu(min_size - torch.mean(torch.sum(fake_mask, dim=(-1,-2))))
         cvg_loss += F.relu(min_size - torch.mean(torch.sum(rmask, dim=(-1,-2))))
 
-        loss = g_loss + bin_loss * args.bin + cvg_loss * args.cvg
+        real_mask = get_mask(fake_img)
+        mk_loss = F.mse_loss(fake_mask, real_mask)
+
+        loss = g_loss + bin_loss * args.bin + cvg_loss * args.cvg + mk_loss * args.mk
 
         loss_dict["g"] = g_loss
         loss_dict["bin"] = bin_loss
@@ -500,38 +505,36 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         #     g_optim.step()
 
 
-        ############# guide mutual invarient #############
-        requires_grad(generator, True)
-        requires_grad(mknet, False)
+        # ############# guide mutual invarient #############
+        # requires_grad(generator, True)
+        # requires_grad(mknet, False)
 
-        guide_regularize = i % args.guide_reg_every == 0
-        # guide_regularize = False
-        if guide_regularize:
-            noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
+        # guide_regularize = i % args.guide_reg_every == 0
+        # # guide_regularize = False
+        # if guide_regularize:
+        #     noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
 
-            imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True)
-            _, bg_img1, _, mask1 = imgs1
-            imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True)
-            _, bg_img2, _, mask2 = imgs2
+        #     imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True)
+        #     _, bg_img1, _, mask1 = imgs1
+        #     imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True)
+        #     _, bg_img2, _, mask2 = imgs2
 
-            # mask1 = get_mask(mknet, segnet, style_img1)
-            # mask2 = get_mask(mknet, segnet, style_img2)
-            rmask1 = torch.ones_like(mask1) - mask1
-            rmask2 = torch.ones_like(mask2) - mask2
-            mut_rmask = rmask1 * rmask2
+        #     rmask1 = torch.ones_like(mask1) - mask1
+        #     rmask2 = torch.ones_like(mask2) - mask2
+        #     mut_rmask = rmask1 * rmask2
 
-            bg1 = mut_rmask * bg_img1
-            bg2 = mut_rmask * bg_img2
+        #     bg1 = mut_rmask * bg_img1
+        #     bg2 = mut_rmask * bg_img2
 
-            bg_loss = F.mse_loss(bg1, bg2)
+        #     bg_loss = F.mse_loss(bg1, bg2)
 
-            loss = bg_loss * args.mi
+        #     loss = bg_loss * args.mi
 
-            loss_dict["mi"] = bg_loss
+        #     loss_dict["mi"] = bg_loss
 
-            generator.zero_grad()
-            loss.backward()
-            g_optim.step()
+        #     generator.zero_grad()
+        #     loss.backward()
+        #     g_optim.step()
 
 
         accumulate(g_ema, g_module, accum)
@@ -547,7 +550,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         path_length_val = loss_reduced["path_length"].mean().item()
         bin_loss_val = loss_reduced["bin"].mean().item()
         cvg_loss_val = loss_reduced["cvg"].mean().item()
-        mi_loss_val = loss_reduced["mi"].mean().item()
+        # mi_loss_val = loss_reduced["mi"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -570,7 +573,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Path Length": path_length_val,
                         "binary loss": bin_loss_val,
                         "minimum coverage loss": cvg_loss_val,
-                        "mutual invariant loss": mi_loss_val,
+                        # "mutual invariant loss": mi_loss_val,
                     }
                 )
 
@@ -660,7 +663,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_17.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_18.pt",
                 )
 
 
@@ -960,7 +963,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_17")
+        wandb.init(project="guide 6_18")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim)
