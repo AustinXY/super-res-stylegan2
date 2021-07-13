@@ -421,9 +421,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         _, _, fake_img, fake_mask = imgs
 
-        rmask = torch.ones_like(fake_mask) - fake_mask
-        full_size = fake_mask.size(-1) * fake_mask.size(-2)
-
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
 
@@ -432,18 +429,14 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         bin_loss = binarization_loss(fake_mask)
 
-        min_size = full_size * args.min_ratio
-        cvg_loss = F.relu(min_size - torch.mean(torch.sum(fake_mask, dim=(-1,-2))))
-        cvg_loss += F.relu(min_size - torch.mean(torch.sum(rmask, dim=(-1,-2))))
-
         real_mask = get_mask(mknet, segnet, fake_img)
         gmk_loss = F.mse_loss(fake_mask, real_mask)
 
-        loss = g_loss + bin_loss * args.bin + cvg_loss * args.cvg + gmk_loss * args.gmk
+        loss = g_loss + bin_loss * args.bin + gmk_loss * args.gmk
 
         loss_dict["g"] = g_loss
         loss_dict["bin"] = bin_loss
-        loss_dict["cvg"] = cvg_loss
+        loss_dict["gmk"] = gmk_loss
 
         generator.zero_grad()
         loss.backward()
@@ -549,8 +542,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         bin_loss_val = loss_reduced["bin"].mean().item()
-        cvg_loss_val = loss_reduced["cvg"].mean().item()
-        # mi_loss_val = loss_reduced["mi"].mean().item()
+        gmk_loss_val = loss_reduced["gmk"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -572,8 +564,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Fake Score": fake_score_val,
                         "Path Length": path_length_val,
                         "binary loss": bin_loss_val,
-                        "minimum coverage loss": cvg_loss_val,
-                        # "mutual invariant loss": mi_loss_val,
+                        "generator mask": gmk_loss_val,
                     }
                 )
 
@@ -807,7 +798,7 @@ if __name__ == "__main__":
     parser.add_argument("--dis2", type=float, default=0.5, help="mse weight")
 
     parser.add_argument("--gmk", type=float, default=10, help="mse weight")
-    parser.add_argument("--bin", type=float, default=10, help="mse weight")
+    parser.add_argument("--bin", type=float, default=0, help="mse weight")
     parser.add_argument("--cvg", type=float, default=1, help="mse weight")
     parser.add_argument("--mi", type=float, default=10, help="mse weight")
 
