@@ -1,4 +1,4 @@
-# using sep mode
+# using sep mode, fg tunnel, bg open
 
 import argparse
 import math
@@ -296,6 +296,25 @@ def un_normalize(img):
     return convert_image_dtype(img_, dtype=torch.float)
 
 
+def concentration_loss(mask):
+    size = mask.size(-1)
+    rmask = torch.ones_like(mask) - mask
+    x = torch.tensor(list(range(size)))
+    y = torch.tensor(list(range(size)))
+    grid_x, grid_y = torch.meshgrid(x, y)
+    grid_x.to(device).view(1,1,size,size)
+    grid_y.to(device).view(1,1,size,size)
+
+    mean_mx = torch.sum(grid_x * mask, dim=(-1,-2)) / torch.sum(mask, dim=(-1,-2))
+    mean_my = torch.sum(grid_y * mask, dim=(-1,-2)) / torch.sum(mask, dim=(-1,-2))
+
+    mean_rmx = torch.sum(grid_x * rmask, dim=(-1,-2)) / torch.sum(rmask, dim=(-1,-2))
+    mean_rmy = torch.sum(grid_y * rmask, dim=(-1,-2)) / torch.sum(rmask, dim=(-1,-2))
+
+    torch.sum((grid_x - mean_mx)**2 * mask), dim=(-1,-2)
+
+
+
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim):
     loader = sample_data(loader)
 
@@ -505,7 +524,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         guide_regularize = i % args.guide_reg_every == 0
         # guide_regularize = False
         if guide_regularize:
-            ijid = random.randint(1, g_ema.n_latent - 1)
+            ijid = random.randint(1, g_ema.generator.n_latent - 1)
             noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
 
             imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True, inject_index=ijid)
@@ -544,6 +563,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         path_length_val = loss_reduced["path_length"].mean().item()
         bin_loss_val = loss_reduced["bin"].mean().item()
         gmk_loss_val = loss_reduced["gmk"].mean().item()
+        mi_loss_val = loss_reduced["mi"].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
@@ -566,6 +586,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Path Length": path_length_val,
                         "binary loss": bin_loss_val,
                         "generator mask": gmk_loss_val,
+                        "mutual invariant": mi_loss_val
                     }
                 )
 
@@ -575,7 +596,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     mknet.eval()
 
                     img_noise = g_module.make_noise()
-                    ijid = random.randint(1, g_ema.n_latent - 1)
+                    ijid = random.randint(1, g_ema.generator.n_latent - 1)
 
                     noise1, noise2, noise3 = sample_n_noise(8, args.latent//2, args.mixing, device, n=3)
                     imgs1, _ = g_ema(torch.cat([noise1, noise2], dim=2), return_separately=True, noise=img_noise, inject_index=ijid)
@@ -656,7 +677,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "ada_aug_p": ada_aug_p,
                         "cur_itr": i
                     },
-                    f"checkpoint/{str(i).zfill(6)}_6_19.pt",
+                    f"checkpoint/{str(i).zfill(6)}_6_18.pt",
                 )
 
 
@@ -960,7 +981,7 @@ if __name__ == "__main__":
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
-        wandb.init(project="guide 6_19")
+        wandb.init(project="guide 6_18")
 
     train(args, loader, generator, discriminator,
           g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim)

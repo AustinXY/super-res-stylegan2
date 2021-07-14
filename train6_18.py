@@ -1,4 +1,4 @@
-# using sep mode
+# using sep mode, two close tunnel
 
 import argparse
 import math
