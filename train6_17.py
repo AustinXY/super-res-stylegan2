@@ -296,6 +296,24 @@ def un_normalize(img):
     return convert_image_dtype(img_, dtype=torch.float)
 
 
+def concentration_loss(mask):
+    size = mask.size(-1)
+    rmask = torch.ones_like(mask) - mask
+    x = torch.tensor(list(range(size)))
+    y = torch.tensor(list(range(size)))
+    grid_x, grid_y = torch.meshgrid(x, y)
+    grid_x.to(device).view(1,1,size,size)
+    grid_y.to(device).view(1,1,size,size)
+
+    mean_mx = torch.sum(grid_x * mask, dim=(-1,-2)) / torch.sum(mask, dim=(-1,-2))
+    mean_my = torch.sum(grid_y * mask, dim=(-1,-2)) / torch.sum(mask, dim=(-1,-2))
+
+    mean_rmx = torch.sum(grid_x * rmask, dim=(-1,-2)) / torch.sum(rmask, dim=(-1,-2))
+    mean_rmy = torch.sum(grid_y * rmask, dim=(-1,-2)) / torch.sum(rmask, dim=(-1,-2))
+
+    torch.sum((grid_x - mean_mx)**2 * mask, dim=(-1,-2))
+
+
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device, segnet, mknet, mk_optim):
     loader = sample_data(loader)
 
