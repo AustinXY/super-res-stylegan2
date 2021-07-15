@@ -31,7 +31,7 @@ from distributed import (
     get_world_size,
 )
 
-from model import SepWithMkGenerator, Discriminator, UNet, SEncoder
+from model import SepWithMkGenerator, Discriminator, UNet, Encoder
 
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
@@ -118,10 +118,10 @@ def make_noise(batch, latent_dim, n_noise, device):
 
 
 def mixing_noise(batch, latent_dim, prob, device):
-    if prob > 0 and random.random() < prob:
-        return make_noise(batch, latent_dim, 2, device)
+    # if prob > 0 and random.random() < prob:
+    #     return make_noise(batch, latent_dim, 2, device)
 
-    else:
+    # else:
         return make_noise(batch, latent_dim, 1, device)
 
 
@@ -478,17 +478,13 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(encoder, True)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        imgs, ssc = generator(noise, return_ssc=True, return_separately=True)
+        imgs, _ = generator(noise, return_separately=True)
 
         _, _, _, fake_mask = imgs
 
-        shape_ssc = encoder(fake_mask)
+        shape_code = encoder(fake_mask)
 
-        enc_loss = torch.tensor(0.0, device=device)
-        for shape_s, s in zip(shape_ssc, ssc):
-            channel = s.size(1)
-            enc_loss += F.mse_loss(shape_s, s[:, 0:channel//64])
-            # enc_loss += F.mse_loss(pred_s, s)
+        enc_loss = F.mse_loss(shape_code, noise[0, :, 0:8])
 
         loss_dict['enc'] = enc_loss
         # loss_dict['enc'] = torch.tensor(0.0, device=device)
@@ -549,19 +545,14 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
                     img_noise = g_module.make_noise()
 
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img1, ssc1 = g_ema(noise, noise=img_noise, return_ssc=True)
-                    mask1 = mknet(style_img1)
+                    noise1 = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img1, _ = g_ema(noise1, noise=img_noise)
 
-                    noise = mixing_noise(8, args.latent, args.mixing, device)
-                    style_img2, ssc2 = g_ema(noise, noise=img_noise, return_ssc=True)
+                    noise2 = mixing_noise(8, args.latent, args.mixing, device)
+                    style_img2, _ = g_ema(noise2, noise=img_noise)
 
-                    ssc3 = copy.deepcopy(ssc1)
-                    for l in range(len(ssc3)):
-                        channel = ssc3[l].size(1)
-                        ssc3[l][:, 0:channel//64] = ssc2[l][:, 0:channel//64]
-
-                    style_img3, _ = g_ema(ssc3, input_is_ssc=True, noise=img_noise)
+                    noise3 = torch.cat((noise1[:,:,0:8], noise2[:,:,8:]), dim=2)
+                    style_img3, _ = g_ema(noise3, noise=img_noise)
 
                     utils.save_image(
                         style_img1,
@@ -587,13 +578,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         range=(-1, 1),
                     )
 
-                    utils.save_image(
-                        mask1,
-                        f"sample/{str(i).zfill(6)}_3.png",
-                        nrow=8,
-                        normalize=True,
-                        range=(0, 1),
-                    )
 
                     if wandb and args.wandb:
                         wandb.log(
@@ -807,8 +791,7 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        fgc_0out=True,
-        bgc_0out=True,
+        dim_li=[8, 248, 256]
     ).to(device)
 
     discriminator = Discriminator(
@@ -821,23 +804,22 @@ if __name__ == "__main__":
         style_dim=args.latent,
         n_mlp=args.n_mlp,
         channel_multiplier=args.channel_multiplier,
-        fgc_0out=True,
-        bgc_0out=True,
+        dim_li=[8, 248, 256]
     ).to(device)
 
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
-    with torch.no_grad():
-        noise = mixing_noise(1, args.latent, args.mixing, device)
-        _, ssc = g_ema(noise, return_ssc=True)
-        args.dim_li = []
-        for s in ssc:
-            args.dim_li.append(s.size(1)//64)
+    # with torch.no_grad():
+    #     noise = mixing_noise(1, args.latent, args.mixing, device)
+    #     _, ssc = g_ema(noise, return_ssc=True)
+    #     args.dim_li = []
+    #     for s in ssc:
+    #         args.dim_li.append(s.size(1)//64)
 
-    encoder = SEncoder(
+    encoder = Encoder(
         size=args.size,
-        dim_li = args.dim_li,
+        code_dim=8,
         img_channels=1,
     ).to(device)
 
@@ -852,8 +834,8 @@ if __name__ == "__main__":
 
     enc_optim = optim.Adam(
         encoder.parameters(),
-        lr=args.lr,
-        betas=(0, 0.99),
+        lr=0.0002,
+        betas=(0.5, 0.99),
     )
 
     g_optim = optim.Adam(

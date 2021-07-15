@@ -189,10 +189,9 @@ class ModulatedConv2d(nn.Module):
         downsample=False,
         blur_kernel=[1, 3, 3, 1],
         fused=True,
-        sep_mode=False,
-        fgc_0out=False,
-        bgc_0out=False,
         is_skip=False,
+        dim_li=[],
+        zero_li=[],
     ):
         super().__init__()
 
@@ -202,11 +201,10 @@ class ModulatedConv2d(nn.Module):
         self.out_channel = out_channel
         self.upsample = upsample
         self.downsample = downsample
-        self.sep_mode = sep_mode
         self.style_dim = style_dim
         self.is_skip = is_skip
-        self.fgc_0out = fgc_0out
-        self.bgc_0out = bgc_0out
+        self.dim_li = dim_li
+        self.zero_li = zero_li
 
         if upsample:
             factor = 2
@@ -233,10 +231,9 @@ class ModulatedConv2d(nn.Module):
             torch.randn(1, out_channel, in_channel, kernel_size, kernel_size)
         )
 
-        if not sep_mode:
-            self.modulation = EqualLinear(style_dim, in_channel, bias_init=1)
-        else:
-            self.modulation = EqualLinear(style_dim//2, in_channel//2, bias_init=1)
+        self.modulations = nn.ModuleList()
+        for dim in dim_li:
+            self.modulations.append(EqualLinear(dim, dim * in_channel//style_dim, bias_init=1))
 
         self.demodulate = demodulate
         self.fused = fused
@@ -250,78 +247,63 @@ class ModulatedConv2d(nn.Module):
     def forward(self, input, style, input_is_ssc=False):
         batch, in_channel, height, width = input.shape
 
-        if not self.fused:
-            weight = self.scale * self.weight.squeeze(0)
-            style = self.modulation(style)
+        # if not self.fused:
+        #     weight = self.scale * self.weight.squeeze(0)
+        #     style = self.modulation(style)
 
-            if self.demodulate:
-                w = weight.unsqueeze(
-                    0) * style.view(batch, 1, in_channel, 1, 1)
-                dcoefs = (w.square().sum((2, 3, 4)) + 1e-8).rsqrt()
+        #     if self.demodulate:
+        #         w = weight.unsqueeze(
+        #             0) * style.view(batch, 1, in_channel, 1, 1)
+        #         dcoefs = (w.square().sum((2, 3, 4)) + 1e-8).rsqrt()
 
-            input = input * style.reshape(batch, in_channel, 1, 1)
+        #     input = input * style.reshape(batch, in_channel, 1, 1)
 
-            if self.upsample:
-                weight = weight.transpose(0, 1)
-                out = conv2d_gradfix.conv_transpose2d(
-                    input, weight, padding=0, stride=2
-                )
-                out = self.blur(out)
+        #     if self.upsample:
+        #         weight = weight.transpose(0, 1)
+        #         out = conv2d_gradfix.conv_transpose2d(
+        #             input, weight, padding=0, stride=2
+        #         )
+        #         out = self.blur(out)
 
-            elif self.downsample:
-                input = self.blur(input)
-                out = conv2d_gradfix.conv2d(input, weight, padding=0, stride=2)
+        #     elif self.downsample:
+        #         input = self.blur(input)
+        #         out = conv2d_gradfix.conv2d(input, weight, padding=0, stride=2)
 
-            else:
-                out = conv2d_gradfix.conv2d(
-                    input, weight, padding=self.padding)
+        #     else:
+        #         out = conv2d_gradfix.conv2d(
+        #             input, weight, padding=self.padding)
 
-            if self.demodulate:
-                out = out * dcoefs.view(batch, -1, 1, 1)
+        #     if self.demodulate:
+        #         out = out * dcoefs.view(batch, -1, 1, 1)
 
-            return out
+        #     return out
 
         if not input_is_ssc:
-            if not self.sep_mode:
-                style = self.modulation(style)
-            else:
-                style = torch.cat([self.modulation(style[:, 0:self.style_dim//2]),
-                                   self.modulation(style[:, self.style_dim//2:])], dim=1)
+            cur_dim = 0
+            style_li = []
+            for i, dim in enumerate(self.dim_li):
+                s = style[:, cur_dim:cur_dim+dim]
+                style_li.append(self.modulations[i](s))
+                cur_dim += dim
+            style = torch.cat(style_li, dim=1)
 
         style = style.view(batch, 1, in_channel, 1, 1)
-        if not self.sep_mode:
-            _style = style
+
+        _style = style.repeat(1, self.out_channel, 1, 1, 1)
+
+        if not self.is_skip:
+            _style[:, 0:self.out_channel//2, in_channel//2:] *= 0
+            _style[:, self.out_channel//2:, 0:in_channel//2] *= 0
         else:
-            if not self.is_skip:
-                fgc = style[:,:,0:in_channel//2]
-                if self.fgc_0out:
-                    fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-                else:
-                    fgc = torch.cat([fgc, fgc], dim=2)
-                fgc = fgc.repeat(1,self.out_channel//2,1,1,1)
-
-                bgc = style[:,:,in_channel//2:]
-                if self.bgc_0out:
-                    bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
-                else:
-                    bgc = torch.cat([bgc, bgc], dim=2)
-                bgc = bgc.repeat(1,self.out_channel//2,1,1,1)
-
-                _style = torch.cat([fgc, bgc], dim=1)
-            else:
-                if self.out_channel % 2 == 0:
-                    oc1 = self.out_channel // 2
-                else:
-                    oc1 = (self.out_channel + 1) // 2
-                oc2 = self.out_channel - oc1
-
-                fgc = style[:,:,0:in_channel//2]
-                fgc = torch.cat([fgc, torch.zeros_like(fgc)], dim=2)
-                fgc = fgc.repeat(1,oc1,1,1,1)
-                bgc = style[:,:,in_channel//2:]
-                bgc = torch.cat([torch.zeros_like(bgc), bgc], dim=2)
-                bgc = bgc.repeat(1,oc2,1,1,1)
-                _style = torch.cat([fgc, bgc], dim=1)
+            _style[:, 0:4, in_channel//2:] *= 0
+            _style[:, 4:, 0:in_channel//2] *= 0
+        # for in_cords in self.zero_li:
+        #     if not self.is_skip:
+        #         rat = self.out_channel//self.style_dim
+        #         out_cords = (in_cords[0] * rat, in_cords[1] * rat)
+        #         _style[:, out_cords[0]:out_cords[1], in_cords[0]:in_cords[1]] *= 0
+        #     else:
+        #         _style[:, 0:4, ]
 
         weight = self.scale * self.weight * _style
 
@@ -416,10 +398,9 @@ class StyledConv(nn.Module):
         upsample=False,
         blur_kernel=[1, 3, 3, 1],
         demodulate=True,
-        sep_mode=False,
         negative_slope=0.2,
-        fgc_0out=False,
-        bgc_0out=False,
+        dim_li=[],
+        zero_li = []
     ):
         super().__init__()
 
@@ -431,9 +412,8 @@ class StyledConv(nn.Module):
             upsample=upsample,
             blur_kernel=blur_kernel,
             demodulate=demodulate,
-            sep_mode=sep_mode,
-            fgc_0out=fgc_0out,
-            bgc_0out=bgc_0out,
+            dim_li=dim_li,
+            zero_li=zero_li,
         )
 
         self.noise = NoiseInjection()
@@ -451,14 +431,22 @@ class StyledConv(nn.Module):
 
 
 class ToRGB(nn.Module):
-    def __init__(self, in_channel, style_dim, im_channel=3, upsample=True, blur_kernel=[1, 3, 3, 1], sep_mode=False):
+    def __init__(self, in_channel, style_dim, im_channel=3, upsample=True, blur_kernel=[1, 3, 3, 1], dim_li=[], zero_li=[]):
         super().__init__()
 
         if upsample:
             self.upsample = Upsample(blur_kernel)
 
         self.conv = ModulatedConv2d(
-            in_channel, im_channel, 1, style_dim, demodulate=False, sep_mode=sep_mode, is_skip=True)
+            in_channel,
+            im_channel,
+            1,
+            style_dim,
+            demodulate=False,
+            is_skip=True,
+            dim_li=dim_li,
+            zero_li=zero_li,
+        )
         self.bias = nn.Parameter(torch.zeros(1, im_channel, 1, 1))
 
     def forward(self, input, style, skip=None, input_is_ssc=False):
@@ -483,65 +471,65 @@ class Generator(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
-        sep_mode=False,
         negative_slope=0.2,
         starting_feature_size=4,
         no_skip=False,
-        fgc_0out=False,
-        bgc_0out=False,
+        dim_li=[],
+        zero_li=[]
     ):
         super().__init__()
 
         self.size = size
-        self.sep_mode = sep_mode
         self.no_skip = no_skip
 
         self.style_dim = style_dim
+        if dim_li == []:
+            dim_li = [style_dim]
 
-        layers = [PixelNorm()]
+        self.dim_li = dim_li
 
-        if not sep_mode:
+        layers = []
+        for dim in dim_li:
+            layer = [PixelNorm()]
+
             for _ in range(n_mlp):
-                layers.append(
+                layer.append(
                     EqualLinear(
-                        style_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
+                        dim, dim, lr_mul=lr_mlp, activation="fused_lrelu"
                     )
                 )
-        else:
-            for _ in range(n_mlp):
-                layers.append(
-                    EqualLinear(
-                        style_dim//2, style_dim//2, lr_mul=lr_mlp, activation="fused_lrelu"
-                    )
-                )
 
-        self.style = nn.Sequential(*layers)
+            layers.append(layer)
 
+        self.styles = nn.ModuleList()
+        for layer in layers:
+            self.styles.append(nn.Sequential(*layer))
+
+        # self.channels = {
+        #     4: 512,
+        #     8: 512,
+        #     16: 512,
+        #     32: 512,
+        #     64: 256 * channel_multiplier,
+        #     128: 128 * channel_multiplier,
+        #     256: 64 * channel_multiplier,
+        #     512: 32 * channel_multiplier,
+        #     1024: 16 * channel_multiplier,
+        # }
+
+        ################################
         self.channels = {
             4: 512,
             8: 512,
             16: 512,
             32: 512,
             64: 256 * channel_multiplier,
-            128: 128 * channel_multiplier,
+            128: 256 * channel_multiplier,
             256: 64 * channel_multiplier,
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
         }
-
-        #################################
-        # self.channels = {
-        #     4: 128,
-        #     8: 128,
-        #     16: 128,
-        #     32: 128,
-        #     64: 64 * channel_multiplier,
-        #     128: 32 * channel_multiplier,
-        #     256: 64 * channel_multiplier,
-        #     512: 32 * channel_multiplier,
-        #     1024: 16 * channel_multiplier,
-        # }
-        #################################
+        ################################
 
         starting_n_channel = self.channels[starting_feature_size]
         self.input = ConstantInput(starting_n_channel)
@@ -551,12 +539,19 @@ class Generator(nn.Module):
             3,
             style_dim,
             blur_kernel=blur_kernel,
-            sep_mode=sep_mode,
             negative_slope=negative_slope,
-            fgc_0out=fgc_0out,
-            bgc_0out=bgc_0out,
+            dim_li=dim_li,
+            zero_li=zero_li
         )
-        self.to_rgb1 = ToRGB(starting_n_channel, style_dim, im_channel=im_channel, upsample=False, sep_mode=sep_mode)
+
+        self.to_rgb1 = ToRGB(
+            starting_n_channel,
+            style_dim,
+            im_channel=im_channel,
+            upsample=False,
+            dim_li=dim_li,
+            zero_li=zero_li
+        )
 
         self.log_size = int(math.log(size, 2))
         self.num_layers = (self.log_size - int(math.log(starting_feature_size, 2))) * 2 + 1
@@ -585,10 +580,9 @@ class Generator(nn.Module):
                     style_dim,
                     upsample=True,
                     blur_kernel=blur_kernel,
-                    sep_mode=sep_mode,
                     negative_slope=negative_slope,
-                    fgc_0out=fgc_0out,
-                    bgc_0out=bgc_0out,
+                    dim_li=dim_li,
+                    zero_li=zero_li
                 )
             )
 
@@ -599,14 +593,19 @@ class Generator(nn.Module):
                     3,
                     style_dim,
                     blur_kernel=blur_kernel,
-                    sep_mode=sep_mode,
                     negative_slope=negative_slope,
-                    fgc_0out=fgc_0out,
-                    bgc_0out=bgc_0out,
+                    dim_li=dim_li,
+                    zero_li=zero_li
                 )
             )
 
-            self.to_rgbs.append(ToRGB(out_channel, style_dim, im_channel=im_channel, sep_mode=sep_mode))
+            self.to_rgbs.append(ToRGB(
+                out_channel,
+                style_dim,
+                im_channel=im_channel,
+                dim_li=dim_li,
+                zero_li=zero_li
+            ))
 
             in_channel = out_channel
 
@@ -655,13 +654,17 @@ class Generator(nn.Module):
         return_skips=False,
         return_ssc_only=False,
     ):
-        if not self.sep_mode:
-            if (not input_is_latent) and (not input_is_ssc):
-                styles = [self.style(s) for s in styles]
-        else:
-            if (not input_is_latent) and (not input_is_ssc):
-                styles = [torch.cat([self.style(s[:, 0:self.style_dim//2]),
-                                     self.style(s[:, self.style_dim//2:])] , dim=1) for s in styles]
+        if (not input_is_latent) and (not input_is_ssc):
+            cur_dim = 0
+            styles_li = []
+            for i, dim in enumerate(self.dim_li):
+                style_block = styles[:, :, cur_dim:cur_dim+dim]
+                styles_li.append([self.styles[i](s) for s in style_block])
+                cur_dim += dim
+
+            styles = []
+            for i in range(len(styles_li[0])):
+                styles.append(torch.cat([style_block[i] for style_block in styles_li], dim=1))
 
         if noise is None:
             if randomize_noise:
@@ -1356,7 +1359,7 @@ class UNet(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, size, num_ws, img_channels=3, w_dim=512):
+    def __init__(self, size, code_dim, img_channels=3):
         super().__init__()
 
         channels = {
@@ -1371,9 +1374,6 @@ class Encoder(nn.Module):
             1024: 16
         }
 
-        self.w_dim = w_dim
-        self.n_latents = num_ws
-
         log_size = int(math.log(size, 2))
         convs = [ConvLayer(img_channels, channels[size], 1)]
 
@@ -1387,28 +1387,14 @@ class Encoder(nn.Module):
         self.convs = nn.Sequential(*convs)
 
         self.final_linear = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4] * self.n_latents, activation="fused_lrelu"),
-            EqualLinear(channels[4] * self.n_latents, self.w_dim * self.n_latents))
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+            EqualLinear(channels[4], code_dim))
 
-    def forward(self, input, return_li=True, n_first=False):
+    def forward(self, input):
         batch = input.size(0)
         out = self.convs(input)
         out = self.final_linear(out.view(batch, -1))
-        # if use_sigmoid:
-        # out = torch.tanh(out) * 5
-        out = out.view(batch, self.n_latents, self.w_dim)
-        if n_first:
-            return out.transpose(0, 1)
         return out
-
-        if self.n_latents > 1:
-            if return_li:
-                return list(out.view(self.n_latents, batch, self.w_dim).unbind(0))
-            return out.view(batch, self.n_latents, self.w_dim)
-        else:
-            if return_li:
-                return [out.view(batch, self.w_dim)]
-            return out.view(batch, self.w_dim)
 
 
 class LinearModule(nn.Module):
@@ -2616,8 +2602,8 @@ class SepWithMkGenerator(nn.Module):
         lr_mlp=0.01,
         negative_slope=0.2,
         no_skip=False,
-        fgc_0out=False,
-        bgc_0out=False,
+        dim_li=[],
+        zero_li=[]
         ):
         super().__init__()
 
@@ -2629,11 +2615,10 @@ class SepWithMkGenerator(nn.Module):
             channel_multiplier=channel_multiplier,
             blur_kernel=blur_kernel,
             lr_mlp=lr_mlp,
-            sep_mode=True,
             negative_slope=negative_slope,
             no_skip=no_skip,
-            fgc_0out=fgc_0out,
-            bgc_0out=bgc_0out,
+            dim_li=dim_li,
+            zero_li=zero_li
         )
 
     def make_noise(self):
