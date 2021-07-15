@@ -509,16 +509,16 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             noise1, noise2, noise3 = sample_n_noise(args.batch//2, args.latent//2, args.mixing, device, n=3)
 
             imgs1, _ = generator(torch.cat([noise1, noise2], dim=2), return_separately=True, inject_index=ijid)
-            _, bg_img1, _, mask1 = imgs1
+            _, _, fnl_img1, mask1 = imgs1
             imgs2, _ = generator(torch.cat([noise3, noise2], dim=2), return_separately=True, inject_index=ijid)
-            _, bg_img2, _, mask2 = imgs2
+            _, _, fnl_img2, mask2 = imgs2
 
             rmask1 = torch.ones_like(mask1) - mask1
             rmask2 = torch.ones_like(mask2) - mask2
             mut_rmask = rmask1 * rmask2
 
-            bg1 = mut_rmask * bg_img1
-            bg2 = mut_rmask * bg_img2
+            bg1 = mut_rmask * fnl_img1
+            bg2 = mut_rmask * fnl_img2
 
             bg_loss = F.mse_loss(bg1, bg2)
 
@@ -804,7 +804,7 @@ if __name__ == "__main__":
     parser.add_argument("--gmk", type=float, default=10, help="mse weight")
     parser.add_argument("--bin", type=float, default=0, help="mse weight")
     parser.add_argument("--cvg", type=float, default=1, help="mse weight")
-    parser.add_argument("--mi", type=float, default=10, help="mse weight")
+    parser.add_argument("--mi", type=float, default=50, help="mse weight")
 
     parser.add_argument("--min_ratio", type=float, default=0.2, help="Threshold for mask")
 
