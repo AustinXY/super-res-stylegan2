@@ -278,3 +278,82 @@ class G_NET(nn.Module):
             rtn = fg_masked3
 
         return rtn
+
+################################# Encoder ######################################
+
+def encode_parent_and_child_img(ndf, in_c=3):
+    encode_img = nn.Sequential(
+        nn.Conv2d(in_c, ndf, 4, 2, 1, bias=False),
+        nn.LeakyReLU(0.2, inplace=True),
+        nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+        nn.BatchNorm2d(ndf * 2),
+        nn.LeakyReLU(0.2, inplace=True),
+        nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+        nn.BatchNorm2d(ndf * 4),
+        nn.LeakyReLU(0.2, inplace=True),
+        nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+        nn.BatchNorm2d(ndf * 8),
+        nn.LeakyReLU(0.2, inplace=True)
+    )
+    return encode_img
+
+def downBlock(in_planes, out_planes):
+    block = nn.Sequential(
+        nn.Conv2d(in_planes, out_planes, 4, 2, 1, bias=False),
+        nn.BatchNorm2d(out_planes),
+        nn.LeakyReLU(0.2, inplace=True)
+    )
+    return block
+
+def Block3x3_leakRelu(in_planes, out_planes):
+    block = nn.Sequential( conv3x3(in_planes, out_planes),
+                           nn.BatchNorm2d(out_planes),
+                           nn.LeakyReLU(0.2, inplace=True) )
+    return block
+
+class Encoder(nn.Module):
+    def __init__(self, ):
+        super(Encoder, self).__init__()
+        self.ndf = 64
+
+        self.softmax = torch.nn.Softmax(dim=1)
+
+
+        self.model_z = nn.Sequential(encode_parent_and_child_img(self.ndf),
+                                   downBlock(self.ndf*8, self.ndf*16),
+                                   Block3x3_leakRelu(self.ndf*16, self.ndf*8),
+                                   Block3x3_leakRelu(self.ndf*8, self.ndf*8),
+                                   nn.Conv2d(self.ndf*8, 100,  kernel_size=4, stride=4),
+                                   nn.Tanh())
+
+
+        self.model_b = nn.Sequential(encode_parent_and_child_img(self.ndf),
+                                   downBlock(self.ndf*8, self.ndf*16),
+                                   Block3x3_leakRelu(self.ndf*16, self.ndf*8),
+                                   Block3x3_leakRelu(self.ndf*8, self.ndf*8),
+                                   nn.Conv2d(self.ndf*8, 200,  kernel_size=4, stride=4))
+
+        self.model_p = nn.Sequential(encode_parent_and_child_img(self.ndf),
+                                   downBlock(self.ndf*8, self.ndf*16),
+                                   Block3x3_leakRelu(self.ndf*16, self.ndf*8),
+                                   Block3x3_leakRelu(self.ndf*8, self.ndf*8),
+                                   nn.Conv2d(self.ndf*8, 20,  kernel_size=4, stride=4))
+
+        self.model_c = nn.Sequential(encode_parent_and_child_img(self.ndf),
+                                   downBlock(self.ndf*8, self.ndf*16),
+                                   Block3x3_leakRelu(self.ndf*16, self.ndf*8),
+                                   Block3x3_leakRelu(self.ndf*8, self.ndf*8),
+                                   nn.Conv2d(self.ndf*8, 200,  kernel_size=4, stride=4))
+
+
+    def forward(self, x_var, type_):
+
+        code_z =   self.model_z(x_var).view(-1, 100)*4
+        code_b =   self.model_b(x_var).view(-1, 200)
+        code_p =   self.model_p(x_var).view(-1, 20)
+        code_c =   self.model_c(x_var).view(-1, 200)
+
+        if type_ == 'logits':
+            return code_z, code_b, code_p, code_c
+        if type_ == 'softmax':
+            return code_z, self.softmax(code_b),self.softmax(code_p),self.softmax(code_c)
